@@ -22,26 +22,61 @@ let callTimer = null;
 let callStartTime = null;
 let remoteStreams = {};
 let peerConnections = {};
-let bestICEServers = []; // Будут храниться лучшие ICE серверы
+let bestICEServers = [];
 let peerReconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 3;
+const MAX_RECONNECT_ATTEMPTS = 5;
 let peerConnectionHealthCheck = null;
+let currentPeerServer = 0;
 const MAX_HISTORY = 100;
 const MAX_AUDIO_SIZE = 5 * 1024 * 1024;
 
-// Конфигурация PeerJS
-const PEERJS_CONFIG = {
-    host: '0.peerjs.com',
-    port: 443,
-    path: '/',
-    key: 'peerjs',
-    secure: true,
-    debug: 3
-};
+// Список альтернативных PeerJS серверов
+const PEERJS_SERVERS = [
+    {
+        host: '0.peerjs.com',
+        port: 443,
+        path: '/',
+        key: 'peerjs',
+        secure: true,
+        pingInterval: 5000
+    },
+    {
+        host: '1.peerjs.com',
+        port: 443,
+        path: '/',
+        key: 'peerjs',
+        secure: true,
+        pingInterval: 5000
+    },
+    {
+        host: '2.peerjs.com',
+        port: 443,
+        path: '/',
+        key: 'peerjs',
+        secure: true,
+        pingInterval: 5000
+    },
+    {
+        host: '3.peerjs.com',
+        port: 443,
+        path: '/',
+        key: 'peerjs',
+        secure: true,
+        pingInterval: 5000
+    },
+    // Резервный сервер с другим портом
+    {
+        host: '0.peerjs.com',
+        port: 9000,
+        path: '/',
+        key: 'peerjs',
+        secure: false,
+        pingInterval: 3000
+    }
+];
 
 // Все доступные ICE серверы (STUN + TURN)
 const ALL_ICE_SERVERS = [
-    // === GOOGLE STUN ===
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
@@ -51,45 +86,12 @@ const ALL_ICE_SERVERS = [
     { urls: 'stun:stun1.l.google.com:19305' },
     { urls: 'stun:stun2.l.google.com:19305' },
     { urls: 'stun:stun3.l.google.com:19305' },
-    
-    // === TWILIO ===
     { urls: 'stun:global.stun.twilio.com:3478' },
-    
-    // === MOZILLA ===
     { urls: 'stun:stun.services.mozilla.com:3478' },
-    
-    // === MICROSOFT ===
     { urls: 'stun:stun.office.com:3478' },
-    
-    // === VOIP СЕРВЕРЫ ===
     { urls: 'stun:stun.voipgate.com:3478' },
     { urls: 'stun:stun.sipgate.com:3478' },
-    { urls: 'stun:stun.voipstunt.com:3478' },
-    { urls: 'stun:stun.voiparound.com:3478' },
-    { urls: 'stun:stun.voipbuster.com:3478' },
-    
-    // === ПУБЛИЧНЫЕ СЕРВЕРЫ ===
     { urls: 'stun:stun.stunprotocol.org:3478' },
-    { urls: 'stun:stun.ideasip.com:3478' },
-    { urls: 'stun:stun.ekiga.net:3478' },
-    { urls: 'stun:stun.voip.blackberry.com:3478' },
-    { urls: 'stun:stun.nextcloud.com:3478' },
-    { urls: 'stun:stun.mgn.ru:3478' },
-    { urls: 'stun:stun.sipnet.ru:3478' },
-    { urls: 'stun:stun.iptel.org:3478' },
-    { urls: 'stun:stun.rockenstein.de:3478' },
-    { urls: 'stun:stun.freeswitch.org:3478' },
-    { urls: 'stun:stun.solcon.nl:3478' },
-    { urls: 'stun:stun.t-online.de:3478' },
-    { urls: 'stun:stun.freevoipdeal.com:3478' },
-    
-    // === АЛЬТЕРНАТИВНЫЕ ПОРТЫ ===
-    { urls: 'stun:stun.l.google.com:5349' },
-    { urls: 'stun:stun1.l.google.com:5349' },
-    { urls: 'stun:stun2.l.google.com:5349' },
-    { urls: 'stun:stun3.l.google.com:5349' },
-    
-    // === TURN СЕРВЕРЫ (для сложных сетей) ===
     {
         urls: [
             'turn:openrelay.metered.ca:80',
@@ -114,21 +116,6 @@ const ALL_ICE_SERVERS = [
         ],
         username: 'homeo',
         credential: 'homeo'
-    },
-    {
-        urls: 'turn:relay.metered.ca:80',
-        username: 'free',
-        credential: 'free'
-    },
-    {
-        urls: 'turn:relay.metered.ca:443',
-        username: 'free',
-        credential: 'free'
-    },
-    {
-        urls: 'turn:relay.metered.ca:443?transport=tcp',
-        username: 'free',
-        credential: 'free'
     }
 ];
 
@@ -160,8 +147,7 @@ const endCallBtn = document.getElementById('endCallBtn');
 const callTimerElement = document.getElementById('callTimer');
 const remoteAudioContainer = document.getElementById('remoteAudioContainer');
 const startCallBtn = document.getElementById('startCallBtn');
-const stunTestBtn = document.getElementById('stunTestBtn');
-const iceStatusDiv = document.getElementById('iceStatus');
+const serverStatusDiv = document.getElementById('serverStatus');
 
 // Инициализация
 async function init() {
@@ -182,9 +168,10 @@ async function init() {
     // Загружаем PeerJS
     await loadPeerJS();
     
-    // Добавляем кнопку диагностики
+    // Добавляем UI элементы
     addDiagnosticButton();
     addSTUNTestButton();
+    addServerSelector();
     
     // Тестируем ICE серверы
     await testAndSelectBestICEServers();
@@ -198,8 +185,76 @@ async function init() {
     // Проверка здоровья соединения
     startConnectionHealthCheck();
     
-    // Отображаем статус
     updateStatus('✅ Система готова');
+}
+
+// Добавление селектора серверов
+function addServerSelector() {
+    if (!serverStatusDiv) return;
+    
+    serverStatusDiv.innerHTML = `
+        <div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 5px;">
+            <div style="font-size: 12px; color: #666; margin-bottom: 5px;">Сервер PeerJS:</div>
+            <div id="currentServerInfo" style="font-size: 11px; color: #17a2b8;">
+                ${PEERJS_SERVERS[currentPeerServer].host}:${PEERJS_SERVERS[currentPeerServer].port}
+            </div>
+            <button onclick="switchToNextServer()" style="margin-top: 5px; padding: 5px 10px; font-size: 12px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer;">
+                🔄 Сменить сервер
+            </button>
+        </div>
+    `;
+}
+
+// Переключение на следующий сервер
+function switchToNextServer() {
+    if (!peer || peer.destroyed) {
+        currentPeerServer = (currentPeerServer + 1) % PEERJS_SERVERS.length;
+        updateServerStatus();
+        alert(`Сервер изменен на: ${PEERJS_SERVERS[currentPeerServer].host}:${PEERJS_SERVERS[currentPeerServer].port}`);
+        return;
+    }
+    
+    const confirmChange = confirm(`Текущий сервер: ${PEERJS_SERVERS[currentPeerServer].host}\n\nСменить на следующий сервер? Текущее соединение будет перезапущено.`);
+    
+    if (confirmChange) {
+        // Сохраняем текущее состояние
+        const wasInRoom = !!currentRoom;
+        const savedRoomCode = currentRoom;
+        const savedIsHost = roomHost;
+        
+        // Отключаемся
+        disconnect();
+        
+        // Меняем сервер
+        currentPeerServer = (currentPeerServer + 1) % PEERJS_SERVERS.length;
+        updateServerStatus();
+        
+        // Восстанавливаем соединение если были в комнате
+        if (wasInRoom) {
+            setTimeout(() => {
+                if (savedIsHost) {
+                    // Для хоста нужно создать новую комнату
+                    currentRoom = savedRoomCode;
+                    createRoom();
+                } else {
+                    // Для клиента пробуем подключиться снова
+                    connectCodeInput.value = savedRoomCode;
+                    connectToRoom();
+                }
+            }, 1000);
+        }
+        
+        alert(`Сервер изменен на: ${PEERJS_SERVERS[currentPeerServer].host}:${PEERJS_SERVERS[currentPeerServer].port}`);
+    }
+}
+
+// Обновление статуса сервера
+function updateServerStatus() {
+    const serverInfoDiv = document.getElementById('currentServerInfo');
+    if (serverInfoDiv) {
+        const server = PEERJS_SERVERS[currentPeerServer];
+        serverInfoDiv.textContent = `${server.host}:${server.port} ${server.secure ? '🔒' : '⚠️'}`;
+    }
 }
 
 // Добавление кнопки диагностики
@@ -207,19 +262,24 @@ function addDiagnosticButton() {
     const diagBtn = document.createElement('button');
     diagBtn.textContent = '🩺 Диагностика';
     diagBtn.className = 'diagnostic-btn';
-    diagBtn.style.marginTop = '10px';
-    diagBtn.style.padding = '8px 16px';
-    diagBtn.style.backgroundColor = '#6c757d';
-    diagBtn.style.color = 'white';
-    diagBtn.style.border = 'none';
-    diagBtn.style.borderRadius = '4px';
-    diagBtn.style.cursor = 'pointer';
+    diagBtn.style.cssText = `
+        margin-top: 10px;
+        padding: 8px 16px;
+        background: #6c757d;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+    `;
     diagBtn.onclick = () => {
         diagnoseAudioIssues();
+        testCurrentServer();
         
         const diagnosticInfo = `
 Диагностика системы:
 
+PeerJS сервер: ${PEERJS_SERVERS[currentPeerServer].host}:${PEERJS_SERVERS[currentPeerServer].port}
 Peer: ${peer ? '✅ Создан' : '❌ Не создан'}
 Комната: ${currentRoom || '❌ Нет'}
 Имя: ${userName}
@@ -232,11 +292,73 @@ ICE серверов: ${bestICEServers.length}
         alert(diagnosticInfo);
     };
     
-    // Добавляем в setupSection
     const setupContainer = document.querySelector('#setupSection .setup-container');
     if (setupContainer) {
         setupContainer.appendChild(diagBtn);
     }
+}
+
+// Тест текущего сервера
+async function testCurrentServer() {
+    const server = PEERJS_SERVERS[currentPeerServer];
+    console.log(`Testing server: ${server.host}:${server.port}`);
+    
+    updateStatus(`🔍 Тестирую сервер ${server.host}...`);
+    
+    try {
+        // Пробуем подключиться к WebSocket
+        const testResult = await testWebSocketConnection(server);
+        
+        if (testResult.success) {
+            console.log(`✅ Сервер ${server.host} доступен`);
+            addSystemMessage(`✅ Сервер ${server.host} работает нормально`);
+            return true;
+        } else {
+            console.warn(`⚠️ Сервер ${server.host} проблемы: ${testResult.error}`);
+            addSystemMessage(`⚠️ Сервер ${server.host}: ${testResult.error}`);
+            return false;
+        }
+    } catch (error) {
+        console.error(`❌ Ошибка теста сервера ${server.host}:`, error);
+        addSystemMessage(`❌ Ошибка теста сервера ${server.host}`);
+        return false;
+    }
+}
+
+// Тест WebSocket соединения
+function testWebSocketConnection(server) {
+    return new Promise((resolve) => {
+        const protocol = server.secure ? 'wss://' : 'ws://';
+        const wsUrl = `${protocol}${server.host}:${server.port}${server.path || ''}`;
+        
+        console.log(`Testing WebSocket: ${wsUrl}`);
+        
+        const socket = new WebSocket(wsUrl);
+        const timeout = setTimeout(() => {
+            socket.close();
+            resolve({ success: false, error: 'Таймаут подключения' });
+        }, 5000);
+        
+        socket.onopen = () => {
+            clearTimeout(timeout);
+            socket.close();
+            resolve({ success: true, error: null });
+        };
+        
+        socket.onerror = (error) => {
+            clearTimeout(timeout);
+            resolve({ success: false, error: 'WebSocket ошибка' });
+        };
+        
+        socket.onclose = (event) => {
+            clearTimeout(timeout);
+            if (event.code === 1006) {
+                resolve({ success: false, error: 'Аномальное закрытие (возможно firewall)' });
+            } else {
+                resolve({ success: false, error: `Закрыто с кодом ${event.code}` });
+            }
+        };
+    });
 }
 
 // Добавление кнопки теста STUN
@@ -245,14 +367,17 @@ function addSTUNTestButton() {
     testBtn.id = 'stunTestBtn';
     testBtn.textContent = '🔍 Тест соединения';
     testBtn.className = 'ice-test-btn';
-    testBtn.style.marginTop = '10px';
-    testBtn.style.padding = '8px 16px';
-    testBtn.style.backgroundColor = '#17a2b8';
-    testBtn.style.color = 'white';
-    testBtn.style.border = 'none';
-    testBtn.style.borderRadius = '4px';
-    testBtn.style.cursor = 'pointer';
-    testBtn.style.marginLeft = '10px';
+    testBtn.style.cssText = `
+        margin-top: 10px;
+        padding: 8px 16px;
+        background: #17a2b8;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        margin-left: 10px;
+    `;
     testBtn.onclick = testAndSelectBestICEServers;
     
     const setupDiv = document.querySelector('#setupSection .setup-container');
@@ -274,22 +399,42 @@ async function loadPeerJS() {
         console.log('Loading PeerJS...');
         updateStatus('⏳ Загрузка PeerJS...');
         
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/peerjs@1.5.0/dist/peerjs.min.js';
+        // Пробуем несколько источников для загрузки PeerJS
+        const sources = [
+            'https://unpkg.com/peerjs@1.5.0/dist/peerjs.min.js',
+            'https://cdn.jsdelivr.net/npm/peerjs@1.5.0/dist/peerjs.min.js',
+            'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.0/peerjs.min.js'
+        ];
         
-        script.onload = function() {
-            console.log('✅ PeerJS loaded successfully');
-            updateStatus('✅ PeerJS загружен');
-            resolve();
-        };
+        let currentSource = 0;
         
-        script.onerror = function() {
-            console.error('❌ Failed to load PeerJS');
-            updateStatus('❌ Ошибка загрузки PeerJS');
-            reject(new Error('Failed to load PeerJS'));
-        };
+        function loadScript(source) {
+            const script = document.createElement('script');
+            script.src = source;
+            
+            script.onload = function() {
+                console.log(`✅ PeerJS loaded from: ${source}`);
+                updateStatus('✅ PeerJS загружен');
+                resolve();
+            };
+            
+            script.onerror = function() {
+                console.warn(`❌ Failed to load PeerJS from: ${source}`);
+                currentSource++;
+                
+                if (currentSource < sources.length) {
+                    console.log(`Trying next source: ${sources[currentSource]}`);
+                    loadScript(sources[currentSource]);
+                } else {
+                    updateStatus('❌ Ошибка загрузки PeerJS');
+                    reject(new Error('Failed to load PeerJS from all sources'));
+                }
+            };
+            
+            document.head.appendChild(script);
+        }
         
-        document.head.appendChild(script);
+        loadScript(sources[currentSource]);
     });
 }
 
@@ -301,8 +446,8 @@ async function testAndSelectBestICEServers() {
     const testResults = [];
     const workingServers = [];
     
-    // Берем первые 15 серверов для быстрого теста
-    const serversToTest = ALL_ICE_SERVERS.slice(0, 15);
+    // Берем первые 10 серверов для быстрого теста
+    const serversToTest = ALL_ICE_SERVERS.slice(0, 10);
     
     for (const server of serversToTest) {
         try {
@@ -334,9 +479,9 @@ async function testAndSelectBestICEServers() {
         s.urls.toString().includes('turn:') || s.urls.toString().includes('turns:')
     );
     
-    bestICEServers = [...workingServers, ...turnServers.slice(0, 3)];
+    bestICEServers = [...workingServers, ...turnServers.slice(0, 2)];
     
-    console.log(`✅ Выбрано ${workingServers.length} STUN и ${turnServers.slice(0,3).length} TURN серверов`);
+    console.log(`✅ Выбрано ${workingServers.length} STUN и ${turnServers.slice(0,2).length} TURN серверов`);
     
     const summary = `Найдено ${workingServers.length} STUN серверов`;
     updateStatus(summary);
@@ -426,15 +571,26 @@ function getBestICEServers() {
     return bestICEServers;
 }
 
-// Создание экземпляра Peer
-function createPeerInstance(id = null) {
-    const config = { ...PEERJS_CONFIG };
-    config.config = {
-        iceServers: getBestICEServers(),
-        iceCandidatePoolSize: 10,
-        iceTransportPolicy: 'all',
-        rtcpMuxPolicy: 'require',
-        bundlePolicy: 'max-bundle'
+// Создание экземпляра Peer с отказоустойчивостью
+async function createPeerInstance(id = null) {
+    const server = PEERJS_SERVERS[currentPeerServer];
+    console.log(`Creating peer with server: ${server.host}:${server.port}`);
+    
+    const config = {
+        host: server.host,
+        port: server.port,
+        path: server.path,
+        key: server.key,
+        secure: server.secure,
+        config: {
+            iceServers: getBestICEServers(),
+            iceCandidatePoolSize: 10,
+            iceTransportPolicy: 'all',
+            rtcpMuxPolicy: 'require',
+            bundlePolicy: 'max-bundle'
+        },
+        debug: 2,
+        pingInterval: server.pingInterval || 5000
     };
     
     if (id) {
@@ -462,7 +618,6 @@ function cleanupUserList() {
                 if (!timeStamp || parseInt(timeStamp) < fiveMinutesAgo) {
                     localStorage.removeItem(key);
                     localStorage.removeItem(timeKey);
-                    console.log('Cleaned up old user:', userId);
                 }
             }
         }
@@ -478,17 +633,20 @@ function startConnectionHealthCheck() {
     peerConnectionHealthCheck = setInterval(() => {
         if (peer) {
             const connectionsCount = Object.keys(connections).length;
-            console.log('Connection health check:', {
-                peerOpen: peer.open,
-                peerDestroyed: peer.destroyed,
-                peerDisconnected: peer.disconnected,
-                activeConnections: connectionsCount,
-                callState: callState
-            });
+            
+            // Периодический пинг сервера
+            if (Date.now() % 30000 < 1000) { // Каждые 30 секунд
+                testCurrentServer().then(isAlive => {
+                    if (!isAlive && currentRoom) {
+                        console.log('Server appears down, attempting to switch...');
+                        addSystemMessage('⚠️ Проблемы с сервером, пробую переключить...');
+                        setTimeout(() => switchToNextServer(), 2000);
+                    }
+                });
+            }
             
             // Если peer отключен и мы в комнате, пытаемся переподключиться
             if (peer.disconnected && currentRoom && connectionsCount === 0) {
-                console.log('Peer disconnected, attempting reconnect...');
                 attemptReconnect();
             }
         }
@@ -500,25 +658,32 @@ function attemptReconnect() {
     if (peerReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
         console.log('Max reconnect attempts reached');
         updateStatus('❌ Не удалось восстановить соединение');
-        addSystemMessage('❌ Соединение с сервером потеряно. Попробуйте перезагрузить страницу.');
+        addSystemMessage('❌ Сервер недоступен. Попробуйте сменить сервер или перезагрузить страницу.');
+        
+        // Предлагаем сменить сервер
+        setTimeout(() => {
+            if (confirm('Сервер недоступен. Хотите попробовать другой сервер?')) {
+                switchToNextServer();
+            }
+        }, 1000);
+        
         return;
     }
     
     peerReconnectAttempts++;
     console.log(`Reconnect attempt ${peerReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
     
-    updateStatus('🔄 Попытка переподключения...');
+    updateStatus(`🔄 Попытка переподключения (${peerReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
     
     if (peer && peer.reconnect) {
         peer.reconnect();
         
         setTimeout(() => {
             if (peer.disconnected) {
-                // Если не помогло, создаем нового пира
-                if (roomHost) {
-                    createRoom();
-                } else {
-                    connectToRoom();
+                // Если не помогло, пробуем другой сервер после 3 попыток
+                if (peerReconnectAttempts >= 3) {
+                    console.log('Too many reconnect failures, switching server');
+                    switchToNextServer();
                 }
             }
         }, 3000);
@@ -692,7 +857,7 @@ function backToChat() {
     }, 100);
 }
 
-// Создание новой комнаты
+// Создание новой комнаты с отказоустойчивостью
 async function createRoom() {
     console.log('=== createRoom() called ===');
     
@@ -717,24 +882,58 @@ async function createRoom() {
     
     setupSection.style.display = 'none';
     
-    // Создаем Peer с лучшими ICE серверами
-    peer = createPeerInstance(currentRoom);
-    
-    setupPeerEvents();
-    
-    roomCodeElement.value = currentRoom;
-    roomInfo.classList.remove('hidden');
-    updateStatus('✅ Комната создана. Ожидание участников...');
-    
-    const infoButton = document.getElementById('infoButton');
-    if (infoButton) {
-        infoButton.textContent = 'ℹ️ Инфо';
+    // Пробуем создать peer с отказоустойчивостью
+    try {
+        peer = await createPeerInstance(currentRoom);
+        setupPeerEvents();
+        
+        // Ждем открытия соединения с таймаутом
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('Timeout creating peer'));
+            }, 10000);
+            
+            peer.on('open', () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+            
+            peer.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
+        
+        roomCodeElement.value = currentRoom;
+        roomInfo.classList.remove('hidden');
+        updateStatus('✅ Комната создана. Ожидание участников...');
+        
+        const infoButton = document.getElementById('infoButton');
+        if (infoButton) {
+            infoButton.textContent = 'ℹ️ Инфо';
+        }
+        
+        updateUsersList();
+        
+    } catch (error) {
+        console.error('Error creating room:', error);
+        updateStatus('❌ Ошибка создания комнаты');
+        addSystemMessage('❌ Не удалось подключиться к серверу PeerJS');
+        
+        // Предлагаем сменить сервер
+        setTimeout(() => {
+            if (confirm(`Ошибка подключения к серверу ${PEERJS_SERVERS[currentPeerServer].host}. Попробовать другой сервер?`)) {
+                switchToNextServer();
+            } else {
+                // Возвращаем в setup
+                setupSection.style.display = 'block';
+                roomSection.style.display = 'none';
+            }
+        }, 500);
     }
-    
-    updateUsersList();
 }
 
-// Подключение к существующей комнате
+// Подключение к существующей комнате с отказоустойчивостью
 async function connectToRoom() {
     console.log('=== connectToRoom() called ===');
     
@@ -770,27 +969,62 @@ async function connectToRoom() {
     
     setupSection.style.display = 'none';
     
-    // Создаем Peer с лучшими ICE серверами
-    peer = createPeerInstance();
-    
-    setupPeerEvents();
-    updateStatus('Подключение к комнате...');
+    // Пробуем создать peer с отказоустойчивостью
+    try {
+        peer = await createPeerInstance();
+        setupPeerEvents();
+        
+        // Ждем открытия соединения с таймаутом
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('Timeout connecting to peer server'));
+            }, 10000);
+            
+            peer.on('open', () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+            
+            peer.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
+        
+        updateStatus('Подключение к комнате...');
+        
+    } catch (error) {
+        console.error('Error connecting to room:', error);
+        updateStatus('❌ Ошибка подключения');
+        addSystemMessage('❌ Не удалось подключиться к серверу PeerJS');
+        
+        // Предлагаем сменить сервер
+        setTimeout(() => {
+            if (confirm(`Ошибка подключения к серверу ${PEERJS_SERVERS[currentPeerServer].host}. Попробовать другой сервер?`)) {
+                switchToNextServer();
+            } else {
+                // Возвращаем в setup
+                setupSection.style.display = 'block';
+                roomSection.style.display = 'none';
+            }
+        }, 500);
+    }
 }
 
-// Настройка обработчиков событий Peer
+// Настройка обработчиков событий Peer с улучшенной обработкой ошибок
 function setupPeerEvents() {
     peer.on('open', (id) => {
         console.log('Peer opened with ID:', id);
-        peerReconnectAttempts = 0; // Сбрасываем счетчик при успешном подключении
+        peerReconnectAttempts = 0;
         
         if (roomHost) {
             updateStatus(`✅ Комната создана (${currentRoom}). Ожидание участников...`);
+            addSystemMessage(`✅ Подключено к серверу: ${PEERJS_SERVERS[currentPeerServer].host}`);
         } else {
             connectToHost();
         }
         showCallButton();
         
-        // Логируем ICE серверы которые используются
         console.log('Используемые ICE серверы:', getBestICEServers());
     });
     
@@ -825,29 +1059,33 @@ function setupPeerEvents() {
     peer.on('close', () => {
         console.log('Peer connection closed');
         updateStatus('❌ Соединение закрыто');
+        addSystemMessage('❌ Соединение с сервером закрыто');
     });
 }
 
-// Обработка ошибок соединения
+// Улучшенная обработка ошибок соединения
 function handleConnectionError(error) {
     console.error('Connection error:', error);
     
     let message = '';
     let detailedInfo = '';
+    let shouldSwitchServer = false;
     
     if (error.type === 'peer-unavailable') {
         message = '❌ Комната не найдена. Проверьте код комнаты.';
         detailedInfo = 'Убедитесь что:\n1. Код комнаты правильный\n2. Хост онлайн\n3. Попробуйте создать новую комнату';
     } else if (error.type === 'server-error' || error.message.includes('Lost connection to server')) {
         message = '❌ Потеряно соединение с сервером.';
-        detailedInfo = 'Проблемы с сервером PeerJS:\n1. Сервер может быть перегружен\n2. Проверьте интернет-соединение\n3. Попробуйте VPN\n4. Подождите 1 минуту и попробуйте снова';
-        
-        // Автоматическая попытка переподключения
-        setTimeout(() => attemptReconnect(), 3000);
+        detailedInfo = `Сервер ${PEERJS_SERVERS[currentPeerServer].host} недоступен:\n1. Сервер перегружен\n2. Проблемы с сетью\n3. Попробуйте VPN\n4. Смените сервер`;
+        shouldSwitchServer = true;
         
     } else if (error.message.includes('Could not connect to peer')) {
         message = '❌ Не удалось подключиться к участнику.';
         detailedInfo = 'Возможные причины:\n- Участник вышел из комнаты\n- Проблемы с сетью\n- NAT/firewall блокирует соединение';
+    } else if (error.message.includes('WebSocket error') || error.message.includes('1006')) {
+        message = '❌ Ошибка WebSocket соединения.';
+        detailedInfo = 'Проблемы с подключением к серверу:\n1. Firewall блокирует WebSocket\n2. Прокси проблемы\n3. Попробуйте другой сервер';
+        shouldSwitchServer = true;
     } else if (error.message.includes('ICE') || error.message.includes('NAT')) {
         message = '❌ Проблема с сетевым соединением (NAT/Файрвол). ';
         detailedInfo = 'Попробуйте:\n1. Перезагрузить страницу\n2. Использовать VPN\n3. Проверить настройки сети';
@@ -861,8 +1099,20 @@ function handleConnectionError(error) {
     updateStatus(message);
     addSystemMessage('⚠️ ' + message);
     
+    // Автоматическое переключение сервера при критических ошибках
+    if (shouldSwitchServer && peerReconnectAttempts >= 2) {
+        setTimeout(() => {
+            console.log('Auto-switching server due to persistent errors');
+            addSystemMessage('🔄 Автоматически переключаю сервер...');
+            switchToNextServer();
+        }, 2000);
+    } else if (shouldSwitchServer) {
+        // Автоматическая попытка переподключения
+        setTimeout(() => attemptReconnect(), 3000);
+    }
+    
     // Показываем подробную информацию
-    if (detailedInfo && !error.message.includes('Lost connection')) {
+    if (detailedInfo) {
         console.log('Детали ошибки:', detailedInfo);
     }
 }
@@ -878,7 +1128,8 @@ function connectToHost() {
         metadata: {
             name: userName,
             timestamp: Date.now(),
-            iceServers: getBestICEServers()
+            iceServers: getBestICEServers(),
+            server: PEERJS_SERVERS[currentPeerServer].host
         }
     });
     
@@ -887,10 +1138,10 @@ function connectToHost() {
         setupConnection(conn);
         showChat();
         
-        // Отправляем информацию о наших ICE серверах
         conn.send({
             type: 'ice_info',
-            servers: getBestICEServers()
+            servers: getBestICEServers(),
+            server: PEERJS_SERVERS[currentPeerServer].host
         });
     });
     
@@ -941,7 +1192,8 @@ function setupConnection(conn) {
             type: 'user_join',
             name: userName,
             id: peer.id,
-            isHost: true
+            isHost: true,
+            server: PEERJS_SERVERS[currentPeerServer].host
         });
         
         if (messageHistory.length > 0) {
@@ -1049,11 +1301,12 @@ function handleIncomingData(data, fromPeer) {
             
         case 'ice_info':
             console.log('Получены ICE серверы от пира:', data.servers);
+            console.log('Пир использует сервер:', data.server);
             break;
     }
 }
 
-// Сохранить информацию о пользователе с временной меткой
+// Сохранить информацию о пользователе
 function saveUserInfo(userId, name) {
     const key = `p2p_chat_user_${userId}`;
     localStorage.setItem(key, name);
@@ -1071,7 +1324,7 @@ function updateUserName(userId, newName) {
     saveUserInfo(userId, newName);
 }
 
-// Получить список ТОЛЬКО активных пользователей
+// Получить список активных пользователей
 function getAllUsers() {
     const users = [{ id: peer.id, name: userName }];
     
@@ -1439,12 +1692,15 @@ function showChat() {
     
     updateStatus(`✅ Подключено к комнате ${currentRoom}`);
     
+    const serverName = PEERJS_SERVERS[currentPeerServer].host;
     if (roomHost) {
         addSystemMessage(`🎉 Вы создали комнату! Код: ${currentRoom}`);
+        addSystemMessage(`🌐 Сервер: ${serverName}`);
         addSystemMessage(`🔍 Используется ${bestICEServers.filter(s => s.urls.toString().includes('stun')).length} STUN серверов`);
         addSystemMessage(`📞 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
     } else {
         addSystemMessage(`🎉 Вы присоединились к комнате ${currentRoom}`);
+        addSystemMessage(`🌐 Сервер: ${serverName}`);
         addSystemMessage(`🔍 Используется ${bestICEServers.length} сетевых серверов`);
         addSystemMessage(`📞 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
     }
@@ -1473,6 +1729,8 @@ function updateStatus(text) {
         statusDiv.className = 'status error';
     } else if (text.includes('⚠️') || text.includes('🔄')) {
         statusDiv.className = 'status warning';
+    } else if (text.includes('🌐')) {
+        statusDiv.className = 'status server';
     } else {
         statusDiv.className = 'status';
     }
@@ -1521,7 +1779,6 @@ async function getCallStream() {
         });
         console.log('Call stream obtained');
         
-        // Проверяем аудио трек
         const audioTracks = callStream.getAudioTracks();
         if (audioTracks.length > 0) {
             console.log('Audio track details:', {
@@ -1566,14 +1823,14 @@ async function startAudioCall(targetUserId = null) {
         }
         
         // Создаем нового пира
-        peer = roomHost ? createPeerInstance(currentRoom) : createPeerInstance();
+        peer = roomHost ? await createPeerInstance(currentRoom) : await createPeerInstance();
         
         setupPeerEvents();
         
         // Ждем подключения с таймаутом
         try {
             await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
+                const timeout = setTimeout(() => reject(new Error('Timeout')), 10000);
                 
                 peer.on('open', () => {
                     clearTimeout(timeout);
@@ -1587,7 +1844,7 @@ async function startAudioCall(targetUserId = null) {
             });
         } catch (error) {
             console.error('Failed to initialize peer:', error);
-            alert('Не удалось инициализировать соединение. Попробуйте снова.');
+            alert('Не удалось инициализировать соединение. Возможно проблемы с сервером. Попробуйте сменить сервер.');
             return;
         }
         
@@ -1603,7 +1860,6 @@ async function startAudioCall(targetUserId = null) {
         return;
     }
     
-    // Проверяем есть ли аудио трек
     const audioTracks = stream.getAudioTracks();
     if (audioTracks.length === 0) {
         alert('Микрофон не найден. Проверьте разрешения.');
@@ -1628,12 +1884,13 @@ async function startAudioCall(targetUserId = null) {
     addSystemMessage(`📞 Вы звоните ${getUserName(targetUserId)}...`);
     
     try {
-        // Создаем звонок с улучшенной конфигурацией
+        // Создаем звонок
         const call = peer.call(targetUserId, stream, {
             metadata: {
                 callerName: userName,
                 timestamp: Date.now(),
-                iceServers: getBestICEServers()
+                iceServers: getBestICEServers(),
+                server: PEERJS_SERVERS[currentPeerServer].host
             }
         });
         
@@ -1641,22 +1898,12 @@ async function startAudioCall(targetUserId = null) {
             throw new Error('Не удалось создать звонок');
         }
         
-        // Добавляем обработчики для отладки
+        // Добавляем обработчики
         call.on('stream', (remoteStream) => {
             console.log('✅ Получен удаленный аудио поток');
             
-            // Проверяем удаленный поток
             const remoteAudioTracks = remoteStream.getAudioTracks();
             console.log('Remote audio tracks:', remoteAudioTracks.length);
-            
-            if (remoteAudioTracks.length > 0) {
-                console.log('Remote track details:', {
-                    enabled: remoteAudioTracks[0].enabled,
-                    readyState: remoteAudioTracks[0].readyState,
-                    muted: remoteAudioTracks[0].muted,
-                    kind: remoteAudioTracks[0].kind
-                });
-            }
             
             handleRemoteStream(targetUserId, remoteStream);
             callState = 'in_call';
@@ -1682,18 +1929,20 @@ async function startAudioCall(targetUserId = null) {
         });
         
         // Отслеживаем ICE состояние
-        call.connection.oniceconnectionstatechange = () => {
-            console.log('ICE connection state:', call.connection.iceConnectionState);
-            
-            if (call.connection.iceConnectionState === 'connected') {
-                console.log('✅ ICE соединение установлено');
-                addSystemMessage('✅ Соединение установлено');
-            } else if (call.connection.iceConnectionState === 'disconnected' || 
-                      call.connection.iceConnectionState === 'failed') {
-                console.warn('⚠️ Проблемы с ICE соединением:', call.connection.iceConnectionState);
-                addSystemMessage('⚠️ Проблемы с соединением...');
-            }
-        };
+        if (call.connection) {
+            call.connection.oniceconnectionstatechange = () => {
+                console.log('ICE connection state:', call.connection.iceConnectionState);
+                
+                if (call.connection.iceConnectionState === 'connected') {
+                    console.log('✅ ICE соединение установлено');
+                    addSystemMessage('✅ Соединение установлено');
+                } else if (call.connection.iceConnectionState === 'disconnected' || 
+                          call.connection.iceConnectionState === 'failed') {
+                    console.warn('⚠️ Проблемы с ICE соединением:', call.connection.iceConnectionState);
+                    addSystemMessage('⚠️ Проблемы с соединением...');
+                }
+            };
+        }
         
         // Сохраняем соединение
         peerConnections[targetUserId] = call;
@@ -1723,7 +1972,6 @@ function handleRemoteStream(userId, stream) {
     
     remoteStreams[userId] = stream;
     
-    // Проверяем поток перед созданием аудио элемента
     const audioTracks = stream.getAudioTracks();
     if (audioTracks.length === 0) {
         console.error('No audio tracks in remote stream');
@@ -1753,7 +2001,6 @@ function handleRemoteStream(userId, stream) {
     
     audioElement.srcObject = stream;
     
-    // Обработчики для отладки
     audioElement.oncanplay = () => {
         console.log(`✅ Аудио может воспроизводиться для ${userId}`);
         audioElement.play().catch(e => {
@@ -1952,7 +2199,6 @@ function resetPeerConnection() {
     remoteStreams = {};
     peerReconnectAttempts = 0;
     
-    // Очищаем аудио элементы
     remoteAudioContainer.innerHTML = '';
     
     console.log('Peer connection reset');
@@ -2076,5 +2322,6 @@ window.playVoiceMessage = playVoiceMessage;
 window.diagnoseAudioIssues = diagnoseAudioIssues;
 window.resetPeerConnection = resetPeerConnection;
 window.testAndSelectBestICEServers = testAndSelectBestICEServers;
+window.switchToNextServer = switchToNextServer;
 
-console.log('P2P Chat loaded with enhanced ICE servers, auto-test, health checks and audio diagnostics');
+console.log('P2P Chat loaded with multiple server support and enhanced error handling');
