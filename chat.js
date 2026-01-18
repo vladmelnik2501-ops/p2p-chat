@@ -25,6 +25,50 @@ let peerConnections = {};
 const MAX_HISTORY = 100;
 const MAX_AUDIO_SIZE = 5 * 1024 * 1024;
 
+// Улучшенные ICE серверы для обхода NAT/Файрволов
+const ENHANCED_ICE_SERVERS = [
+    // STUN серверы Google
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    
+    // STUN Twilio
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    
+    // Дополнительные STUN
+    { urls: 'stun:stun.voipgate.com:3478' },
+    { urls: 'stun:stun.sipgate.com:3478' },
+    
+    // TURN серверы (критически важны для обхода NAT)
+    {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+    },
+    {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+    },
+    {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+    },
+    {
+        urls: 'turn:numb.viagenie.ca',
+        credential: 'muazkh',
+        username: 'webrtc@live.com'
+    },
+    {
+        urls: 'turn:turn.bistri.com:80',
+        credential: 'homeo',
+        username: 'homeo'
+    }
+];
+
 // Элементы DOM
 const setupSection = document.getElementById('setupSection');
 const roomSection = document.getElementById('roomSection');
@@ -68,20 +112,43 @@ function init() {
     }
     console.log('User:', userName);
     
-    // НЕ вызываем loadPeerJS() здесь!
-    // Вместо этого проверяем если PeerJS уже загружен
-    if (typeof Peer !== 'undefined') {
-        console.log('PeerJS already loaded');
-        // PeerJS уже загружен, можно продолжать
-    } else {
-        console.log('PeerJS not loaded yet');
-        // PeerJS загрузится позже через loadPeerJS()
-    }
+    // Запускаем очистку старых пользователей
+    cleanupUserList();
+    
+    // Периодическая очистка
+    setInterval(cleanupUserList, 30000); // Каждые 30 секунд
+}
+
+// Очистка старых пользователей из localStorage
+function cleanupUserList() {
+    if (!peer) return;
+    
+    const activeIds = [peer.id, ...Object.keys(connections)];
+    const allKeys = Object.keys(localStorage);
+    
+    allKeys.forEach(key => {
+        if (key.startsWith('p2p_chat_user_') && !key.endsWith('_time')) {
+            const userId = key.replace('p2p_chat_user_', '');
+            if (!activeIds.includes(userId)) {
+                // Проверяем время последней активности (5 минут)
+                const timeKey = key + '_time';
+                const timeStamp = localStorage.getItem(timeKey);
+                const fiveMinutesAgo = Date.now() - 300000;
+                
+                if (!timeStamp || parseInt(timeStamp) < fiveMinutesAgo) {
+                    localStorage.removeItem(key);
+                    localStorage.removeItem(timeKey);
+                    console.log('Cleaned up old user:', userId);
+                }
+            }
+        }
+    });
 }
 
 // Тест микрофона
 async function testMicrophone() {
     try {
+        console.log('Testing microphone...');
         const stream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
                 echoCancellation: true,
@@ -108,394 +175,18 @@ async function testMicrophone() {
             microphone = null;
         }, 3000);
         
+        console.log('Microphone test passed');
+        
     } catch (error) {
-        console.error('Ошибка доступа к микрофону:', error);
-        micTestDiv.innerHTML = `<span style="color: #dc3545;">❌ Ошибка: ${error.message}</span>`;
+        console.error('Microphone error:', error);
+        micTestDiv.innerHTML = '<span style="color: #dc3545;">❌ Ошибка доступа к микрофону</span>';
         isMicrophoneTested = false;
     }
 }
 
-// Получить аудиопоток для звонка
-async function getCallStream() {
-    try {
-        callStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                sampleRate: 44100,
-                channelCount: 1
-            },
-            video: false
-        });
-        return callStream;
-    } catch (error) {
-        console.error('Ошибка получения аудиопотока:', error);
-        alert('Не удалось получить доступ к микрофону для звонка');
-        return null;
-    }
-}
-
-// Начать аудиозвонок
-// Начать аудиозвонок - ИСПРАВЛЕННАЯ ВЕРСИЯ
-async function startAudioCall(targetUserId = null) {
-    console.log('startAudioCall() called, callState:', callState);
-    
-    if (callState !== 'idle') {
-        alert('Уже есть активный звонок! Завершите текущий звонок сначала.');
-        return;
-    }
-    
-    if (!isMicrophoneTested) {
-        const response = confirm('Рекомендуется сначала проверить микрофон. Начать звонок без проверки?');
-        if (!response) return;
-    }
-    
-    // Проверяем что peer существует и подключен
-    if (!peer || peer.disconnected) {
-        console.log('Peer не существует или отключен, создаем новый...');
-        
-        // Если мы в комнате, нужно пересоздать peer
-        if (currentRoom) {
-            if (roomHost) {
-                // Для хоста: создаем peer с ID комнаты
-                peer = new Peer(currentRoom, {
-                    config: {
-                        iceServers: [
-                            { urls: 'stun:stun.l.google.com:19302' },
-                            { urls: 'stun:global.stun.twilio.com:3478' }
-                        ]
-                    }
-                });
-            } else {
-                // Для клиента: создаем peer без ID
-                peer = new Peer({
-                    config: {
-                        iceServers: [
-                            { urls: 'stun:stun.l.google.com:19302' },
-                            { urls: 'stun:global.stun.twilio.com:3478' }
-                        ]
-                    }
-                });
-            }
-            
-            // Настраиваем обработчики
-            setupPeerEvents();
-            
-            // Ждем подключения
-            await new Promise(resolve => {
-                peer.on('open', resolve);
-                setTimeout(resolve, 2000); // Таймаут 2 секунды
-            });
-        } else {
-            alert('Вы не в комнате! Создайте или присоединитесь к комнате сначала.');
-            return;
-        }
-    }
-    
-    const stream = await getCallStream();
-    if (!stream) return;
-    
-    if (!targetUserId) {
-        const users = getAllUsers().filter(user => user.id !== peer.id);
-        if (users.length === 0) {
-            alert('Нет пользователей для звонка!');
-            return;
-        }
-        targetUserId = users[0].id;
-    }
-    
-    console.log('Starting call to:', targetUserId);
-    
-    callState = 'calling';
-    activeCall = targetUserId;
-    
-    updateCallUI();
-    addSystemMessage(`📞 Вы звоните ${getUserName(targetUserId)}...`);
-    
-    try {
-        // Создаем звонок
-        const call = peer.call(targetUserId, stream);
-        
-        if (!call) {
-            throw new Error('Не удалось создать звонок');
-        }
-        
-        // Настраиваем обработчики звонка
-        call.on('stream', (remoteStream) => {
-            console.log('Получен удаленный поток');
-            handleRemoteStream(targetUserId, remoteStream);
-            callState = 'in_call';
-            callStartTime = Date.now();
-            updateCallTimer();
-            callTimer = setInterval(updateCallTimer, 1000);
-            updateCallUI();
-            updateUsersList();
-        });
-        
-        call.on('close', () => {
-            console.log('Звонок завершен');
-            endCall();
-        });
-        
-        call.on('error', (err) => {
-            console.error('Ошибка звонка:', err);
-            addSystemMessage('❌ Ошибка звонка: ' + err.message);
-            endCall();
-        });
-        
-        // Сохраняем соединение
-        peerConnections[targetUserId] = call;
-        
-        // Таймаут звонка
-        setTimeout(() => {
-            if (callState === 'calling') {
-                addSystemMessage('❌ Звонок не отвечает');
-                endCall();
-            }
-        }, 30000);
-        
-    } catch (error) {
-        console.error('Ошибка при создании звонка:', error);
-        alert('Ошибка при звонке: ' + error.message);
-        endCall();
-    }
-}
-// Принять звонок
-async function acceptCall() {
-    if (callState !== 'ringing' || !activeCall) return;
-    
-    const stream = await getCallStream();
-    if (!stream) return;
-    
-    callState = 'in_call';
-    activeCall.answer(stream);
-    
-    callStartTime = Date.now();
-    updateCallTimer();
-    callTimer = setInterval(updateCallTimer, 1000);
-    
-    updateCallUI();
-    addSystemMessage('✅ Звонок начат');
-    updateUsersList();
-}
-
-// Отклонить звонок
-function rejectCall() {
-    if (callState === 'ringing' && activeCall) {
-        activeCall.close();
-        addSystemMessage('❌ Звонок отклонен');
-    }
-    resetCall();
-}
-
-// Завершить звонок
-function endCall() {
-    console.log('endCall() called');
-    
-    if (activeCall) {
-        if (typeof activeCall.close === 'function') {
-            activeCall.close();
-        }
-    }
-    
-    // Закрываем все соединения звонков
-    Object.values(peerConnections).forEach(conn => {
-        if (conn && conn.close) conn.close();
-    });
-    
-    // Останавливаем локальный поток
-    if (callStream) {
-        callStream.getTracks().forEach(track => track.stop());
-        callStream = null;
-    }
-    
-    // Очищаем удаленные аудио элементы
-    remoteAudioContainer.innerHTML = '';
-    remoteStreams = {};
-    peerConnections = {};
-    
-    // Сбрасываем таймер
-    if (callTimer) {
-        clearInterval(callTimer);
-        callTimer = null;
-    }
-    
-    if (callState === 'in_call') {
-        const duration = Math.round((Date.now() - callStartTime) / 1000);
-        addSystemMessage(`📞 Звонок завершен (длительность: ${duration} сек)`);
-    }
-    
-    resetCall();
-    updateUsersList();
-}
-
-// Обработка входящего звонка
-function handleIncomingCall(call) {
-    if (callState !== 'idle') {
-        call.close();
-        return;
-    }
-    
-    callState = 'ringing';
-    activeCall = call;
-    
-    call.on('stream', (remoteStream) => {
-        handleRemoteStream(call.peer, remoteStream);
-        callState = 'in_call';
-        callStartTime = Date.now();
-        updateCallTimer();
-        callTimer = setInterval(updateCallTimer, 1000);
-        updateCallUI();
-        updateUsersList();
-    });
-    
-    call.on('close', endCall);
-    call.on('error', endCall);
-    
-    updateCallUI();
-    addSystemMessage(`📞 Входящий звонок от ${getUserName(call.peer)}`);
-    
-    setTimeout(() => {
-        if (callState === 'ringing') {
-            addSystemMessage('❌ Звонок пропущен');
-            rejectCall();
-        }
-    }, 30000);
-}
-
-// Обработка удаленного потока
-function handleRemoteStream(userId, stream) {
-    remoteStreams[userId] = stream;
-    
-    const audioId = `remote_audio_${userId}`;
-    let audioElement = document.getElementById(audioId);
-    
-    if (!audioElement) {
-        audioElement = document.createElement('audio');
-        audioElement.id = audioId;
-        audioElement.autoplay = true;
-        audioElement.controls = true;
-        audioElement.style.width = '100%';
-        audioElement.style.marginTop = '5px';
-        remoteAudioContainer.appendChild(audioElement);
-    }
-    
-    audioElement.srcObject = stream;
-    audioElement.setAttribute('title', `Аудио от ${getUserName(userId)}`);
-}
-
-// Обновление UI звонка
-function updateCallUI() {
-    callControls.classList.remove('hidden');
-    
-    switch (callState) {
-        case 'calling':
-            callStatus.textContent = `📞 Звонок ${getUserName(activeCall)}...`;
-            acceptCallBtn.style.display = 'none';
-            rejectCallBtn.style.display = 'inline-block';
-            endCallBtn.style.display = 'inline-block';
-            callTimerElement.style.display = 'none';
-            break;
-            
-        case 'ringing':
-            callStatus.textContent = `📞 Входящий звонок от ${getUserName(activeCall.peer)}`;
-            acceptCallBtn.style.display = 'inline-block';
-            rejectCallBtn.style.display = 'inline-block';
-            endCallBtn.style.display = 'none';
-            callTimerElement.style.display = 'none';
-            break;
-            
-        case 'in_call':
-            callStatus.textContent = `📞 В разговоре с ${getUserName(activeCall.peer || activeCall)}`;
-            acceptCallBtn.style.display = 'none';
-            rejectCallBtn.style.display = 'none';
-            endCallBtn.style.display = 'inline-block';
-            callTimerElement.style.display = 'block';
-            break;
-            
-        default:
-            callControls.classList.add('hidden');
-            break;
-    }
-}
-
-// Обновление таймера звонка
-function updateCallTimer() {
-    if (!callStartTime) return;
-    
-    const seconds = Math.floor((Date.now() - callStartTime) / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    
-    callTimerElement.textContent = `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-}
-
-// Сброс состояния звонка
-function resetCall() {
-    callState = 'idle';
-    activeCall = null;
-    callStartTime = null;
-    updateCallUI();
-}
-
-// Получить имя пользователя по ID
-function getUserName(userId) {
-    const user = getUserInfo(userId);
-    return user ? user.name : `Участник_${userId.substr(0, 4)}`;
-}
-
-// Показать кнопку звонка
-function showCallButton() {
-    if (startCallBtn) {
-        startCallBtn.style.display = 'inline-block';
-        startCallBtn.onclick = () => startAudioCall();
-    }
-}
-
-// Обновляем setupPeerEvents для обработки звонков
-function setupPeerEvents() {
-    peer.on('open', (id) => {
-        console.log('Peer ID:', id);
-        if (roomHost) {
-            updateStatus(`✅ Комната создана (${currentRoom}). Ожидание участников...`);
-        } else {
-            connectToHost();
-        }
-        showCallButton();
-    });
-    
-    peer.on('connection', (conn) => {
-        console.log('Новое подключение:', conn.peer);
-        setupConnection(conn);
-    });
-    
-    peer.on('call', (call) => {
-        console.log('Входящий звонок от:', call.peer);
-        handleIncomingCall(call);
-    });
-    
-    peer.on('error', (err) => {
-        console.error('Peer error:', err);
-        if (err.type === 'peer-unavailable') {
-            updateStatus('❌ Комната не найдена. Проверьте код комнаты.');
-        } else {
-            updateStatus('Ошибка: ' + err.message);
-        }
-    });
-    
-    peer.on('disconnected', () => {
-        updateStatus('Соединение потеряно. Попытка переподключения...');
-        setTimeout(() => {
-            if (peer && !peer.disconnected) {
-                peer.reconnect();
-            }
-        }, 1000);
-    });
-}
-
 // Сохранение имени пользователя
 function saveUserName() {
+    console.log('saveUserName() called');
     const newName = userNameInput.value.trim();
     if (!newName) {
         alert('Пожалуйста, введите имя!');
@@ -510,18 +201,9 @@ function saveUserName() {
     userName = newName;
     localStorage.setItem('p2p_chat_username', userName);
     
-    if (Object.keys(connections).length > 0) {
-        broadcast({
-            type: 'name_change',
-            oldName: userName,
-            newName: userName,
-            userId: peer.id
-        });
-        updateUsersList();
-    }
-    
     setupSection.style.display = 'none';
     roomSection.style.display = 'block';
+    console.log('Name saved:', userName);
 }
 
 // Изменить имя
@@ -570,8 +252,17 @@ function backToChat() {
 
 // Создание новой комнаты
 async function createRoom() {
+    console.log('=== createRoom() called ===');
+    
     if (!userName) {
         alert('Пожалуйста, сначала сохраните имя!');
+        return;
+    }
+    
+    // Проверяем загружен ли PeerJS
+    if (typeof Peer === 'undefined') {
+        alert('Библиотека PeerJS загружается... Подождите немного и попробуйте снова.');
+        loadPeerJS();
         return;
     }
     
@@ -579,16 +270,18 @@ async function createRoom() {
     roomHost = true;
     showingRoomInfo = false;
     
+    console.log('Creating room with code:', currentRoom);
+    
     setupSection.style.display = 'none';
     
+    // Создаем Peer с улучшенными ICE серверами
     peer = new Peer(currentRoom, {
-        debug: 2,
         config: {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:global.stun.twilio.com:3478' }
-            ]
-        }
+            iceServers: ENHANCED_ICE_SERVERS,
+            iceCandidatePoolSize: 10,
+            iceTransportPolicy: 'all'
+        },
+        debug: 2
     });
     
     setupPeerEvents();
@@ -607,6 +300,8 @@ async function createRoom() {
 
 // Подключение к существующей комнате
 async function connectToRoom() {
+    console.log('=== connectToRoom() called ===');
+    
     if (!userName) {
         alert('Пожалуйста, сначала сохраните имя!');
         return;
@@ -627,28 +322,96 @@ async function connectToRoom() {
     roomHost = false;
     showingRoomInfo = false;
     
+    // Проверяем загружен ли PeerJS
+    if (typeof Peer === 'undefined') {
+        alert('Библиотека PeerJS загружается... Подождите немного и попробуйте снова.');
+        loadPeerJS();
+        return;
+    }
+    
+    console.log('Connecting to room:', currentRoom);
+    
+    setupSection.style.display = 'none';
+    
+    // Создаем Peer с улучшенными ICE серверами
     peer = new Peer({
-        debug: 2,
         config: {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:global.stun.twilio.com:3478' }
-            ]
-        }
+            iceServers: ENHANCED_ICE_SERVERS,
+            iceCandidatePoolSize: 10,
+            iceTransportPolicy: 'all'
+        },
+        debug: 2
     });
     
     setupPeerEvents();
     updateStatus('Подключение к комнате...');
-    setupSection.style.display = 'none';
+}
+
+// Настройка обработчиков событий Peer
+function setupPeerEvents() {
+    peer.on('open', (id) => {
+        console.log('Peer opened with ID:', id);
+        if (roomHost) {
+            updateStatus(`✅ Комната создана (${currentRoom}). Ожидание участников...`);
+        } else {
+            connectToHost();
+        }
+        showCallButton();
+    });
     
-    const infoButton = document.getElementById('infoButton');
-    if (infoButton) {
-        infoButton.textContent = 'ℹ️ Инфо';
+    peer.on('connection', (conn) => {
+        console.log('Новое подключение:', conn.peer);
+        setupConnection(conn);
+    });
+    
+    peer.on('call', (call) => {
+        console.log('Входящий звонок от:', call.peer);
+        handleIncomingCall(call);
+    });
+    
+    peer.on('error', (err) => {
+        console.error('Peer error:', err);
+        handleConnectionError(err);
+    });
+    
+    peer.on('disconnected', () => {
+        updateStatus('Соединение потеряно. Попытка переподключения...');
+        setTimeout(() => {
+            if (peer && !peer.disconnected) {
+                peer.reconnect();
+            }
+        }, 1000);
+    });
+    
+    // Диагностика ICE соединения
+    if (peer._options.config) {
+        console.log('Using ICE servers:', peer._options.config.iceServers);
     }
+}
+
+// Обработка ошибок соединения
+function handleConnectionError(error) {
+    console.error('Connection error:', error);
+    
+    let message = 'Ошибка подключения: ';
+    if (error.type === 'peer-unavailable') {
+        message = '❌ Комната не найдена. Проверьте код комнаты.';
+    } else if (error.message.includes('ICE') || error.message.includes('NAT')) {
+        message += 'Проблема с сетевым соединением. ';
+        message += 'Попробуйте: 1) Перезагрузить страницу 2) Использовать VPN 3) Проверить настройки сети';
+    } else if (error.message.includes('permission')) {
+        message += 'Нет разрешения на доступ к микрофону.';
+    } else {
+        message += error.message;
+    }
+    
+    updateStatus(message);
+    addSystemMessage('⚠️ ' + message);
 }
 
 // Подключение к хосту
 function connectToHost() {
+    console.log('Connecting to host...');
     const conn = peer.connect(currentRoom, {
         reliable: true,
         metadata: {
@@ -658,6 +421,7 @@ function connectToHost() {
     });
     
     conn.on('open', () => {
+        console.log('Connected to host');
         setupConnection(conn);
         showChat();
     });
@@ -687,6 +451,10 @@ function setupConnection(conn) {
             addSystemMessage(`${user.name} покинул чат`);
         }
         
+        // Удаляем из localStorage при отключении
+        localStorage.removeItem(`p2p_chat_user_${peerId}`);
+        localStorage.removeItem(`p2p_chat_user_${peerId}_time`);
+        
         updateUsersList();
         
         if (Object.keys(connections).length === 0 && !roomHost) {
@@ -697,6 +465,7 @@ function setupConnection(conn) {
         }
     });
     
+    // Для хоста: при новом подключении отправляем приветственное сообщение
     if (roomHost && peerId !== currentRoom) {
         addSystemMessage(`Новый участник подключается...`);
         
@@ -812,10 +581,11 @@ function handleIncomingData(data, fromPeer) {
     }
 }
 
-// Сохранить информацию о пользователе
+// Сохранить информацию о пользователе с временной меткой
 function saveUserInfo(userId, name) {
     const key = `p2p_chat_user_${userId}`;
     localStorage.setItem(key, name);
+    localStorage.setItem(`${key}_time`, Date.now().toString());
 }
 
 // Получить информацию о пользователе
@@ -829,16 +599,19 @@ function updateUserName(userId, newName) {
     saveUserInfo(userId, newName);
 }
 
-// Получить список всех пользователей
+// Получить список ТОЛЬКО активных пользователей
 function getAllUsers() {
     const users = [{ id: peer.id, name: userName }];
     
     Object.keys(connections).forEach(peerId => {
-        const userInfo = getUserInfo(peerId);
-        if (userInfo) {
-            users.push(userInfo);
-        } else {
-            users.push({ id: peerId, name: `Участник_${peerId.substr(0, 4)}` });
+        const conn = connections[peerId];
+        if (conn && conn.open) {
+            const userInfo = getUserInfo(peerId);
+            if (userInfo) {
+                users.push(userInfo);
+            } else {
+                users.push({ id: peerId, name: `Участник_${peerId.substr(0, 4)}` });
+            }
         }
     });
     
@@ -1136,7 +909,7 @@ function addSystemMessage(text) {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-// Обновление списка участников
+// Обновление списка участников (ТОЛЬКО активные)
 function updateUsersList() {
     const users = getAllUsers();
     usersList.innerHTML = '';
@@ -1177,6 +950,7 @@ function updateUsersList() {
 
 // Показать чат
 function showChat() {
+    console.log('Showing chat...');
     roomSection.style.display = 'none';
     chatSection.classList.remove('hidden');
     showingRoomInfo = false;
@@ -1195,10 +969,12 @@ function showChat() {
     
     if (roomHost) {
         addSystemMessage(`🎉 Вы создали комнату! Код: ${currentRoom}`);
-        addSystemMessage(`🎤 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
+        addSystemMessage(`🔍 Для соединения между разными сетями используются TURN серверы`);
+        addSystemMessage(`📞 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
     } else {
         addSystemMessage(`🎉 Вы присоединились к комнате ${currentRoom}`);
-        addSystemMessage(`🎤 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
+        addSystemMessage(`🔍 Если есть проблемы со звуком, попробуйте обновить страницу или VPN`);
+        addSystemMessage(`📞 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
     }
     
     if (!roomHost) {
@@ -1252,8 +1028,375 @@ function copyRoomCode() {
     alert('Код комнаты скопирован в буфер обмена!');
 }
 
-// Отключение от комнаты
-// Отключение от комнаты - ИСПРАВЛЕННАЯ ВЕРСИЯ
+// Загрузка PeerJS библиотеки
+function loadPeerJS() {
+    if (typeof Peer === 'undefined') {
+        console.log('Loading PeerJS...');
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js';
+        script.onload = function() {
+            console.log('✅ PeerJS loaded successfully');
+        };
+        script.onerror = function() {
+            console.error('❌ Failed to load PeerJS');
+            alert('Ошибка загрузки PeerJS. Проверьте подключение к интернету.');
+        };
+        document.head.appendChild(script);
+    } else {
+        console.log('PeerJS already loaded');
+    }
+}
+
+// Получить аудиопоток для звонка
+async function getCallStream() {
+    try {
+        callStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 44100,
+                channelCount: 1
+            },
+            video: false
+        });
+        console.log('Call stream obtained');
+        return callStream;
+    } catch (error) {
+        console.error('Ошибка получения аудиопотока:', error);
+        alert('Не удалось получить доступ к микрофону для звонка');
+        return null;
+    }
+}
+
+// Начать аудиозвонок (с исправленной реконнектом)
+async function startAudioCall(targetUserId = null) {
+    console.log('startAudioCall() called, callState:', callState);
+    
+    if (callState !== 'idle') {
+        alert('Уже есть активный звонок! Завершите текущий звонок сначала.');
+        return;
+    }
+    
+    if (!isMicrophoneTested) {
+        const response = confirm('Рекомендуется сначала проверить микрофон. Начать звонок без проверки?');
+        if (!response) return;
+    }
+    
+    // Проверяем что peer существует и подключен
+    console.log('Peer state:', {
+        exists: !!peer,
+        destroyed: peer ? peer.destroyed : 'no peer',
+        disconnected: peer ? peer.disconnected : 'no peer',
+        open: peer ? peer.open : 'no peer'
+    });
+    
+    if (!peer || peer.destroyed || peer.disconnected) {
+        console.log('Peer не готов, требуется переподключение...');
+        
+        if (!currentRoom) {
+            alert('Вы не в комнате! Создайте или присоединитесь к комнате сначала.');
+            return;
+        }
+        
+        // Создаем новый peer
+        if (roomHost) {
+            peer = new Peer(currentRoom, {
+                config: {
+                    iceServers: ENHANCED_ICE_SERVERS,
+                    iceCandidatePoolSize: 10,
+                    iceTransportPolicy: 'all'
+                },
+                debug: 2
+            });
+        } else {
+            peer = new Peer({
+                config: {
+                    iceServers: ENHANCED_ICE_SERVERS,
+                    iceCandidatePoolSize: 10,
+                    iceTransportPolicy: 'all'
+                },
+                debug: 2
+            });
+        }
+        
+        setupPeerEvents();
+        
+        // Ждем подключения
+        await new Promise((resolve) => {
+            peer.on('open', resolve);
+            setTimeout(resolve, 2000);
+        });
+        
+        if (!roomHost) {
+            // Переподключаемся к хосту
+            connectToHost();
+        }
+    }
+    
+    const stream = await getCallStream();
+    if (!stream) return;
+    
+    if (!targetUserId) {
+        const users = getAllUsers().filter(user => user.id !== peer.id);
+        if (users.length === 0) {
+            alert('Нет пользователей для звонка!');
+            return;
+        }
+        targetUserId = users[0].id;
+    }
+    
+    console.log('Starting call to:', targetUserId);
+    
+    callState = 'calling';
+    activeCall = targetUserId;
+    
+    updateCallUI();
+    addSystemMessage(`📞 Вы звоните ${getUserName(targetUserId)}...`);
+    
+    try {
+        // Создаем звонок
+        const call = peer.call(targetUserId, stream);
+        
+        if (!call) {
+            throw new Error('Не удалось создать звонок');
+        }
+        
+        // Настраиваем обработчики звонка
+        call.on('stream', (remoteStream) => {
+            console.log('Получен удаленный поток');
+            handleRemoteStream(targetUserId, remoteStream);
+            callState = 'in_call';
+            callStartTime = Date.now();
+            updateCallTimer();
+            callTimer = setInterval(updateCallTimer, 1000);
+            updateCallUI();
+            updateUsersList();
+        });
+        
+        call.on('close', () => {
+            console.log('Звонок завершен');
+            endCall();
+        });
+        
+        call.on('error', (err) => {
+            console.error('Ошибка звонка:', err);
+            addSystemMessage('❌ Ошибка звонка: ' + err.message);
+            endCall();
+        });
+        
+        // Сохраняем соединение
+        peerConnections[targetUserId] = call;
+        
+        // Таймаут звонка
+        setTimeout(() => {
+            if (callState === 'calling') {
+                addSystemMessage('❌ Звонок не отвечает');
+                endCall();
+            }
+        }, 30000);
+        
+    } catch (error) {
+        console.error('Ошибка при создании звонка:', error);
+        alert('Ошибка при звонке: ' + error.message);
+        endCall();
+    }
+}
+
+// Принять звонок
+async function acceptCall() {
+    console.log('acceptCall() called');
+    if (callState !== 'ringing' || !activeCall) return;
+    
+    const stream = await getCallStream();
+    if (!stream) return;
+    
+    callState = 'in_call';
+    activeCall.answer(stream);
+    
+    callStartTime = Date.now();
+    updateCallTimer();
+    callTimer = setInterval(updateCallTimer, 1000);
+    
+    updateCallUI();
+    addSystemMessage('✅ Звонок начат');
+    updateUsersList();
+}
+
+// Отклонить звонок
+function rejectCall() {
+    console.log('rejectCall() called');
+    if (callState === 'ringing' && activeCall) {
+        activeCall.close();
+        addSystemMessage('❌ Звонок отклонен');
+    }
+    resetCall();
+}
+
+// Завершить звонок
+function endCall() {
+    console.log('endCall() called');
+    
+    if (activeCall) {
+        if (typeof activeCall.close === 'function') {
+            activeCall.close();
+        }
+    }
+    
+    Object.values(peerConnections).forEach(conn => {
+        if (conn && conn.close) conn.close();
+    });
+    
+    if (callStream) {
+        callStream.getTracks().forEach(track => track.stop());
+        callStream = null;
+    }
+    
+    remoteAudioContainer.innerHTML = '';
+    remoteStreams = {};
+    peerConnections = {};
+    
+    if (callTimer) {
+        clearInterval(callTimer);
+        callTimer = null;
+    }
+    
+    if (callState === 'in_call') {
+        const duration = Math.round((Date.now() - callStartTime) / 1000);
+        addSystemMessage(`📞 Звонок завершен (длительность: ${duration} сек)`);
+    }
+    
+    resetCall();
+    updateUsersList();
+}
+
+// Обработка входящего звонка
+function handleIncomingCall(call) {
+    if (callState !== 'idle') {
+        call.close();
+        return;
+    }
+    
+    callState = 'ringing';
+    activeCall = call;
+    
+    call.on('stream', (remoteStream) => {
+        handleRemoteStream(call.peer, remoteStream);
+        callState = 'in_call';
+        callStartTime = Date.now();
+        updateCallTimer();
+        callTimer = setInterval(updateCallTimer, 1000);
+        updateCallUI();
+        updateUsersList();
+    });
+    
+    call.on('close', endCall);
+    call.on('error', endCall);
+    
+    updateCallUI();
+    addSystemMessage(`📞 Входящий звонок от ${getUserName(call.peer)}`);
+    
+    setTimeout(() => {
+        if (callState === 'ringing') {
+            addSystemMessage('❌ Звонок пропущен');
+            rejectCall();
+        }
+    }, 30000);
+}
+
+// Обработка удаленного потока
+function handleRemoteStream(userId, stream) {
+    remoteStreams[userId] = stream;
+    
+    const audioId = `remote_audio_${userId}`;
+    let audioElement = document.getElementById(audioId);
+    
+    if (!audioElement) {
+        audioElement = document.createElement('audio');
+        audioElement.id = audioId;
+        audioElement.autoplay = true;
+        audioElement.controls = true;
+        audioElement.style.width = '100%';
+        audioElement.style.marginTop = '5px';
+        remoteAudioContainer.appendChild(audioElement);
+    }
+    
+    audioElement.srcObject = stream;
+    audioElement.setAttribute('title', `Аудио от ${getUserName(userId)}`);
+    
+    console.log('Remote stream playing for user:', userId);
+}
+
+// Обновление UI звонка
+function updateCallUI() {
+    callControls.classList.remove('hidden');
+    
+    switch (callState) {
+        case 'calling':
+            callStatus.textContent = `📞 Звонок ${getUserName(activeCall)}...`;
+            acceptCallBtn.style.display = 'none';
+            rejectCallBtn.style.display = 'inline-block';
+            endCallBtn.style.display = 'inline-block';
+            callTimerElement.style.display = 'none';
+            break;
+            
+        case 'ringing':
+            callStatus.textContent = `📞 Входящий звонок от ${getUserName(activeCall.peer)}`;
+            acceptCallBtn.style.display = 'inline-block';
+            rejectCallBtn.style.display = 'inline-block';
+            endCallBtn.style.display = 'none';
+            callTimerElement.style.display = 'none';
+            break;
+            
+        case 'in_call':
+            callStatus.textContent = `📞 В разговоре с ${getUserName(activeCall.peer || activeCall)}`;
+            acceptCallBtn.style.display = 'none';
+            rejectCallBtn.style.display = 'none';
+            endCallBtn.style.display = 'inline-block';
+            callTimerElement.style.display = 'block';
+            break;
+            
+        default:
+            callControls.classList.add('hidden');
+            break;
+    }
+}
+
+// Обновление таймера звонка
+function updateCallTimer() {
+    if (!callStartTime) return;
+    
+    const seconds = Math.floor((Date.now() - callStartTime) / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    
+    callTimerElement.textContent = `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+// Сброс состояния звонка
+function resetCall() {
+    callState = 'idle';
+    activeCall = null;
+    callStartTime = null;
+    updateCallUI();
+}
+
+// Получить имя пользователя по ID
+function getUserName(userId) {
+    const user = getUserInfo(userId);
+    return user ? user.name : `Участник_${userId.substr(0, 4)}`;
+}
+
+// Показать кнопку звонка
+function showCallButton() {
+    if (startCallBtn) {
+        startCallBtn.style.display = 'inline-block';
+        startCallBtn.onclick = () => startAudioCall();
+        console.log('Call button shown');
+    }
+}
+
+// Отключение от комнаты (не уничтожаем peer полностью)
 function disconnect() {
     console.log('disconnect() called');
     
@@ -1277,18 +1420,17 @@ function disconnect() {
         }
     });
     
-    // НЕ уничтожаем peer полностью, только отключаем
+    // Отправляем сообщение о выходе если есть подключения
+    if (peer && Object.keys(connections).length > 0) {
+        broadcast({
+            type: 'user_left',
+            userId: peer.id,
+            name: userName
+        });
+    }
+    
+    // Закрываем peer соединение, но не уничтожаем объект
     if (peer) {
-        // Отправляем сообщение о выходе если есть подключения
-        if (Object.keys(connections).length > 0) {
-            broadcast({
-                type: 'user_left',
-                userId: peer.id,
-                name: userName
-            });
-        }
-        
-        // Просто закрываем соединение, но не уничтожаем объект
         if (peer.disconnect) {
             peer.disconnect();
         }
@@ -1301,6 +1443,7 @@ function disconnect() {
     messageHistory = [];
     showingRoomInfo = false;
     isRecording = false;
+    resetCall();
     
     // Останавливаем все аудио
     document.querySelectorAll('audio').forEach(audio => {
@@ -1316,54 +1459,23 @@ function disconnect() {
     messagesDiv.innerHTML = '';
     callControls.classList.add('hidden');
     
+    const infoButton = document.getElementById('infoButton');
+    if (infoButton) {
+        infoButton.textContent = 'ℹ️ Инфо';
+    }
+    
+    if (startCallBtn) {
+        startCallBtn.style.display = 'none';
+    }
+    
     updateStatus('❌ Отключено от комнаты');
-    console.log('Disconnected from room');
 }
 
-// Восстановление Peer соединения
-async function reconnectPeer() {
-    console.log('Reconnecting peer...');
-    
-    if (peer && !peer.destroyed) {
-        if (peer.disconnect) {
-            peer.disconnect();
-        }
-    }
-    
-    if (currentRoom) {
-        if (roomHost) {
-            peer = new Peer(currentRoom, {
-                config: {
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:global.stun.twilio.com:3478' }
-                    ]
-                }
-            });
-        } else {
-            peer = new Peer({
-                config: {
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:global.stun.twilio.com:3478' }
-                    ]
-                }
-            });
-            
-            peer.on('open', () => {
-                connectToHost();
-            });
-        }
-        
-        setupPeerEvents();
-        
-        return new Promise((resolve) => {
-            peer.on('open', resolve);
-            setTimeout(resolve, 2000);
-        });
-    }
-    
-    return Promise.resolve();
+// Экранирование HTML
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // Обработка нажатия Enter
@@ -1374,40 +1486,29 @@ function handleKeyPress(event) {
     }
 }
 
-// Экранирование HTML
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
-// Загрузка PeerJS библиотеки
-function loadPeerJS() {
-    if (typeof Peer === 'undefined') {
-        console.log('Loading PeerJS...');
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js';
-        script.onload = function() {
-            console.log('PeerJS loaded successfully');
-            // НЕ вызываем init() здесь!
-            // Просто логируем что библиотека загружена
-        };
-        script.onerror = function() {
-            console.error('Failed to load PeerJS');
-            alert('Ошибка загрузки PeerJS. Проверьте подключение к интернету.');
-        };
-        document.head.appendChild(script);
-    } else {
-        console.log('PeerJS already loaded');
-    }
-}
-
-// Обработка закрытия страницы
-window.onbeforeunload = () => {
-    if (peer && Object.keys(connections).length > 0) {
-        return 'Вы уверены, что хотите покинуть чат?';
-    }
-};
-
 // Инициализация при загрузке страницы
-window.addEventListener('DOMContentLoaded', loadPeerJS);
+window.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM loaded, initializing P2P Chat...');
+    init();
+    loadPeerJS(); // Загружаем PeerJS отдельно
+});
+
+// Экспорт функций в глобальную область
+window.createRoom = createRoom;
+window.saveUserName = saveUserName;
+window.testMicrophone = testMicrophone;
+window.changeName = changeName;
+window.copyRoomCode = copyRoomCode;
+window.connectToRoom = connectToRoom;
+window.sendMessage = sendMessage;
+window.handleKeyPress = handleKeyPress;
+window.toggleRoomInfo = toggleRoomInfo;
+window.backToChat = backToChat;
+window.disconnect = disconnect;
+window.acceptCall = acceptCall;
+window.rejectCall = rejectCall;
+window.endCall = endCall;
+window.toggleVoiceRecording = toggleVoiceRecording;
+window.playVoiceMessage = playVoiceMessage;
+
+console.log('P2P Chat loaded with enhanced ICE servers and user cleanup');
