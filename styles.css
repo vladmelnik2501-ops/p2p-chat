@@ -102,15 +102,6 @@ button.secondary {
     background: #6c757d;
 }
 
-button.voice-btn {
-    background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
-}
-
-button.voice-btn.recording {
-    background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%);
-    animation: pulse 1.5s infinite;
-}
-
 #roomCode {
     font-size: 18px;
     font-weight: bold;
@@ -151,12 +142,6 @@ button.voice-btn.recording {
     to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(255, 65, 108, 0.7); }
-    70% { box-shadow: 0 0 0 10px rgba(255, 65, 108, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(255, 65, 108, 0); }
-}
-
 .message.own {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: white;
@@ -180,17 +165,6 @@ button.voice-btn.recording {
     margin: 10px auto;
     font-style: italic;
     border: 1px dashed #90caf9;
-}
-
-.message.voice {
-    background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
-    border: 1px solid #a8edea;
-    min-width: 200px;
-}
-
-.message.voice.own {
-    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-    border: none;
 }
 
 .message-info {
@@ -220,97 +194,6 @@ button.voice-btn.recording {
 
 #messageInput {
     flex: 1;
-}
-
-.voice-controls {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    padding: 10px;
-    background: #f8f9fa;
-    border-top: 2px solid #e0e0e0;
-}
-
-.voice-visualizer {
-    flex: 1;
-    height: 40px;
-    background: #f0f0f0;
-    border-radius: 20px;
-    overflow: hidden;
-    position: relative;
-}
-
-.voice-wave {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255, 107, 107, 0.3), transparent);
-    animation: wave 2s linear infinite;
-    opacity: 0;
-}
-
-.recording-time {
-    font-weight: bold;
-    color: #ff6b6b;
-    min-width: 60px;
-    text-align: center;
-}
-
-@keyframes wave {
-    0% { transform: translateX(-100%); }
-    100% { transform: translateX(100%); }
-}
-
-.voice-message {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 5px;
-}
-
-.voice-play-btn {
-    background: #667eea;
-    color: white;
-    border: none;
-    border-radius: 50%;
-    width: 36px;
-    height: 36px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.3s;
-}
-
-.voice-play-btn:hover {
-    background: #764ba2;
-    transform: scale(1.1);
-}
-
-.voice-play-btn.playing {
-    background: #ff6b6b;
-}
-
-.voice-duration {
-    font-size: 14px;
-    color: #666;
-}
-
-.voice-progress {
-    flex: 1;
-    height: 4px;
-    background: rgba(0,0,0,0.1);
-    border-radius: 2px;
-    overflow: hidden;
-}
-
-.voice-progress-bar {
-    height: 100%;
-    background: #667eea;
-    width: 0%;
-    transition: width 0.1s;
 }
 
 .status {
@@ -375,10 +258,6 @@ button.voice-btn.recording {
 
 .user-badge.in-call::before {
     content: "📞";
-}
-
-.user-badge.voice::before {
-    content: "🎤";
 }
 
 .call-user-btn {
@@ -494,27 +373,6 @@ button.voice-btn.recording {
     border-radius: 4px;
 }
 
-/* Индикатор записи */
-.recording-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    animation: blink 1s infinite;
-}
-
-.recording-dot {
-    width: 8px;
-    height: 8px;
-    background: #ff0000;
-    border-radius: 50%;
-    display: inline-block;
-}
-
-@keyframes blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-
 /* Аудио контролы */
 .audio-controls {
     display: flex;
@@ -588,11 +446,6 @@ button.voice-btn.recording {
     
     .message {
         max-width: 90%;
-    }
-    
-    .voice-controls {
-        flex-direction: column;
-        gap: 5px;
     }
     
     .call-controls > div {
