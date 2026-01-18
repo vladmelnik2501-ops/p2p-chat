@@ -23,8 +23,21 @@ let callStartTime = null;
 let remoteStreams = {};
 let peerConnections = {};
 let bestICEServers = []; // Будут храниться лучшие ICE серверы
+let peerReconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 3;
+let peerConnectionHealthCheck = null;
 const MAX_HISTORY = 100;
 const MAX_AUDIO_SIZE = 5 * 1024 * 1024;
+
+// Конфигурация PeerJS
+const PEERJS_CONFIG = {
+    host: '0.peerjs.com',
+    port: 443,
+    path: '/',
+    key: 'peerjs',
+    secure: true,
+    debug: 3
+};
 
 // Все доступные ICE серверы (STUN + TURN)
 const ALL_ICE_SERVERS = [
@@ -154,9 +167,6 @@ const iceStatusDiv = document.getElementById('iceStatus');
 async function init() {
     console.log('P2P Chat initializing...');
     
-    // Загружаем PeerJS
-    loadPeerJS();
-    
     // Восстанавливаем имя пользователя
     const savedName = localStorage.getItem('p2p_chat_username');
     if (savedName) {
@@ -169,6 +179,13 @@ async function init() {
     }
     console.log('User:', userName);
     
+    // Загружаем PeerJS
+    await loadPeerJS();
+    
+    // Добавляем кнопку диагностики
+    addDiagnosticButton();
+    addSTUNTestButton();
+    
     // Тестируем ICE серверы
     await testAndSelectBestICEServers();
     
@@ -178,9 +195,47 @@ async function init() {
     // Периодическая очистка
     setInterval(cleanupUserList, 30000);
     
-    // Добавляем кнопку теста STUN если её нет
-    if (!stunTestBtn) {
-        addSTUNTestButton();
+    // Проверка здоровья соединения
+    startConnectionHealthCheck();
+    
+    // Отображаем статус
+    updateStatus('✅ Система готова');
+}
+
+// Добавление кнопки диагностики
+function addDiagnosticButton() {
+    const diagBtn = document.createElement('button');
+    diagBtn.textContent = '🩺 Диагностика';
+    diagBtn.className = 'diagnostic-btn';
+    diagBtn.style.marginTop = '10px';
+    diagBtn.style.padding = '8px 16px';
+    diagBtn.style.backgroundColor = '#6c757d';
+    diagBtn.style.color = 'white';
+    diagBtn.style.border = 'none';
+    diagBtn.style.borderRadius = '4px';
+    diagBtn.style.cursor = 'pointer';
+    diagBtn.onclick = () => {
+        diagnoseAudioIssues();
+        
+        const diagnosticInfo = `
+Диагностика системы:
+
+Peer: ${peer ? '✅ Создан' : '❌ Не создан'}
+Комната: ${currentRoom || '❌ Нет'}
+Имя: ${userName}
+Соединения: ${Object.keys(connections).length}
+Звонок: ${callState}
+ICE серверов: ${bestICEServers.length}
+
+Подробности в консоли (F12)
+`;
+        alert(diagnosticInfo);
+    };
+    
+    // Добавляем в setupSection
+    const setupContainer = document.querySelector('#setupSection .setup-container');
+    if (setupContainer) {
+        setupContainer.appendChild(diagBtn);
     }
 }
 
@@ -190,6 +245,14 @@ function addSTUNTestButton() {
     testBtn.id = 'stunTestBtn';
     testBtn.textContent = '🔍 Тест соединения';
     testBtn.className = 'ice-test-btn';
+    testBtn.style.marginTop = '10px';
+    testBtn.style.padding = '8px 16px';
+    testBtn.style.backgroundColor = '#17a2b8';
+    testBtn.style.color = 'white';
+    testBtn.style.border = 'none';
+    testBtn.style.borderRadius = '4px';
+    testBtn.style.cursor = 'pointer';
+    testBtn.style.marginLeft = '10px';
     testBtn.onclick = testAndSelectBestICEServers;
     
     const setupDiv = document.querySelector('#setupSection .setup-container');
@@ -198,14 +261,42 @@ function addSTUNTestButton() {
     }
 }
 
+// Загрузка PeerJS библиотеки
+async function loadPeerJS() {
+    return new Promise((resolve, reject) => {
+        if (typeof Peer !== 'undefined') {
+            console.log('✅ PeerJS already loaded');
+            updateStatus('✅ PeerJS загружен');
+            resolve();
+            return;
+        }
+        
+        console.log('Loading PeerJS...');
+        updateStatus('⏳ Загрузка PeerJS...');
+        
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/peerjs@1.5.0/dist/peerjs.min.js';
+        
+        script.onload = function() {
+            console.log('✅ PeerJS loaded successfully');
+            updateStatus('✅ PeerJS загружен');
+            resolve();
+        };
+        
+        script.onerror = function() {
+            console.error('❌ Failed to load PeerJS');
+            updateStatus('❌ Ошибка загрузки PeerJS');
+            reject(new Error('Failed to load PeerJS'));
+        };
+        
+        document.head.appendChild(script);
+    });
+}
+
 // Тест и выбор лучших ICE серверов
 async function testAndSelectBestICEServers() {
     console.log('Тестирование ICE серверов...');
     updateStatus('🔍 Тестирование сетевых серверов...');
-    
-    if (iceStatusDiv) {
-        iceStatusDiv.innerHTML = '<div class="ice-testing">⏳ Тестирование STUN/TURN серверов...</div>';
-    }
     
     const testResults = [];
     const workingServers = [];
@@ -223,14 +314,6 @@ async function testAndSelectBestICEServers() {
                 console.log(`✅ Сервер работает: ${server.urls}`);
             }
             
-            // Обновляем статус в реальном времени
-            if (iceStatusDiv) {
-                const statusItem = document.createElement('div');
-                statusItem.className = `ice-server-status ${result.status === 'success' ? 'working' : 'failed'}`;
-                statusItem.textContent = `${result.server} - ${result.details}`;
-                iceStatusDiv.appendChild(statusItem);
-            }
-            
         } catch (error) {
             console.warn(`❌ Ошибка теста сервера:`, server.urls, error);
         }
@@ -246,28 +329,17 @@ async function testAndSelectBestICEServers() {
         workingServers.push({ urls: 'stun:stun1.l.google.com:19302' });
     }
     
-    // Добавляем TURN серверы в конец (они дороже, но нужны для сложных сетей)
+    // Добавляем TURN серверы в конец
     const turnServers = ALL_ICE_SERVERS.filter(s => 
         s.urls.toString().includes('turn:') || s.urls.toString().includes('turns:')
     );
     
     bestICEServers = [...workingServers, ...turnServers.slice(0, 3)];
     
-    console.log(`✅ Выбрано ${workingServers.length} работающих STUN и ${turnServers.slice(0,3).length} TURN серверов`);
+    console.log(`✅ Выбрано ${workingServers.length} STUN и ${turnServers.slice(0,3).length} TURN серверов`);
     
-    const summary = `Найдено ${workingServers.length} работающих серверов`;
+    const summary = `Найдено ${workingServers.length} STUN серверов`;
     updateStatus(summary);
-    
-    if (iceStatusDiv) {
-        iceStatusDiv.innerHTML = `
-            <div class="ice-summary">
-                <strong>Результаты теста:</strong><br>
-                ✅ Работающих: ${workingServers.length}<br>
-                ❌ Недоступных: ${serversToTest.length - workingServers.length}<br>
-                🔄 TURN серверов: ${turnServers.slice(0,3).length}
-            </div>
-        `;
-    }
     
     return bestICEServers;
 }
@@ -313,7 +385,7 @@ async function testICEServer(server) {
                     });
                 });
             
-            // Дополнительная проверка через 1 секунду
+            // Дополнительная проверка
             setTimeout(() => {
                 if (pc.iceGatheringState === 'complete') {
                     clearTimeout(timeout);
@@ -337,10 +409,9 @@ async function testICEServer(server) {
     });
 }
 
-// Получить лучшие ICE серверы (с кэшированием)
+// Получить лучшие ICE серверы
 function getBestICEServers() {
     if (bestICEServers.length === 0) {
-        // Если ещё не тестировали, возвращаем проверенные по умолчанию
         return [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
@@ -353,6 +424,24 @@ function getBestICEServers() {
         ];
     }
     return bestICEServers;
+}
+
+// Создание экземпляра Peer
+function createPeerInstance(id = null) {
+    const config = { ...PEERJS_CONFIG };
+    config.config = {
+        iceServers: getBestICEServers(),
+        iceCandidatePoolSize: 10,
+        iceTransportPolicy: 'all',
+        rtcpMuxPolicy: 'require',
+        bundlePolicy: 'max-bundle'
+    };
+    
+    if (id) {
+        return new Peer(id, config);
+    } else {
+        return new Peer(config);
+    }
 }
 
 // Очистка старых пользователей из localStorage
@@ -378,6 +467,124 @@ function cleanupUserList() {
             }
         }
     });
+}
+
+// Запуск проверки здоровья соединения
+function startConnectionHealthCheck() {
+    if (peerConnectionHealthCheck) {
+        clearInterval(peerConnectionHealthCheck);
+    }
+    
+    peerConnectionHealthCheck = setInterval(() => {
+        if (peer) {
+            const connectionsCount = Object.keys(connections).length;
+            console.log('Connection health check:', {
+                peerOpen: peer.open,
+                peerDestroyed: peer.destroyed,
+                peerDisconnected: peer.disconnected,
+                activeConnections: connectionsCount,
+                callState: callState
+            });
+            
+            // Если peer отключен и мы в комнате, пытаемся переподключиться
+            if (peer.disconnected && currentRoom && connectionsCount === 0) {
+                console.log('Peer disconnected, attempting reconnect...');
+                attemptReconnect();
+            }
+        }
+    }, 10000);
+}
+
+// Попытка переподключения
+function attemptReconnect() {
+    if (peerReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        console.log('Max reconnect attempts reached');
+        updateStatus('❌ Не удалось восстановить соединение');
+        addSystemMessage('❌ Соединение с сервером потеряно. Попробуйте перезагрузить страницу.');
+        return;
+    }
+    
+    peerReconnectAttempts++;
+    console.log(`Reconnect attempt ${peerReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
+    
+    updateStatus('🔄 Попытка переподключения...');
+    
+    if (peer && peer.reconnect) {
+        peer.reconnect();
+        
+        setTimeout(() => {
+            if (peer.disconnected) {
+                // Если не помогло, создаем нового пира
+                if (roomHost) {
+                    createRoom();
+                } else {
+                    connectToRoom();
+                }
+            }
+        }, 3000);
+    }
+}
+
+// Диагностика аудио проблем
+function diagnoseAudioIssues() {
+    console.log('=== Диагностика аудио ===');
+    
+    // Проверяем микрофон
+    navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+            console.log('✅ Микрофон доступен');
+            const audioTrack = stream.getAudioTracks()[0];
+            console.log('Аудио трек:', {
+                enabled: audioTrack.enabled,
+                readyState: audioTrack.readyState,
+                label: audioTrack.label,
+                muted: audioTrack.muted,
+                kind: audioTrack.kind
+            });
+            
+            // Тест уровня звука
+            if (window.AudioContext) {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                source.connect(analyser);
+                
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                setTimeout(() => {
+                    analyser.getByteFrequencyData(dataArray);
+                    const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                    console.log('Уровень звука с микрофона:', average);
+                    
+                    if (average < 5) {
+                        console.warn('⚠️ Микрофон может не улавливать звук');
+                        addSystemMessage('⚠️ Проверьте микрофон - возможно он не улавливает звук');
+                    }
+                    
+                    // Очистка
+                    source.disconnect();
+                    stream.getTracks().forEach(track => track.stop());
+                }, 1000);
+            }
+            
+        })
+        .catch(err => {
+            console.error('❌ Микрофон недоступен:', err);
+            addSystemMessage('❌ Ошибка доступа к микрофону: ' + err.message);
+        });
+    
+    // Проверяем аудио выход
+    const testAudio = new Audio();
+    testAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+    testAudio.volume = 0.1;
+    
+    testAudio.oncanplaythrough = () => {
+        console.log('✅ Аудио выход работает');
+        testAudio.play().catch(e => console.error('❌ Не удалось воспроизвести тестовый звук:', e));
+    };
+    
+    testAudio.onerror = (e) => {
+        console.error('❌ Проблема с аудио выходом:', e);
+    };
 }
 
 // Тест микрофона
@@ -497,31 +704,21 @@ async function createRoom() {
     // Проверяем загружен ли PeerJS
     if (typeof Peer === 'undefined') {
         alert('Библиотека PeerJS загружается... Подождите немного и попробуйте снова.');
-        loadPeerJS();
+        await loadPeerJS();
         return;
     }
     
     currentRoom = generateRoomCode();
     roomHost = true;
     showingRoomInfo = false;
+    peerReconnectAttempts = 0;
     
     console.log('Creating room with code:', currentRoom);
     
     setupSection.style.display = 'none';
     
     // Создаем Peer с лучшими ICE серверами
-    peer = new Peer(currentRoom, {
-        host: '0.peerjs.com',
-        port: 443,
-        path: '/',
-        key: 'peerjs',
-        config: {
-            iceServers: getBestICEServers(),
-            iceCandidatePoolSize: 10,
-            iceTransportPolicy: 'all'
-        },
-        debug: 2
-    });
+    peer = createPeerInstance(currentRoom);
     
     setupPeerEvents();
     
@@ -560,11 +757,12 @@ async function connectToRoom() {
     currentRoom = roomCode;
     roomHost = false;
     showingRoomInfo = false;
+    peerReconnectAttempts = 0;
     
     // Проверяем загружен ли PeerJS
     if (typeof Peer === 'undefined') {
         alert('Библиотека PeerJS загружается... Подождите немного и попробуйте снова.');
-        loadPeerJS();
+        await loadPeerJS();
         return;
     }
     
@@ -573,18 +771,7 @@ async function connectToRoom() {
     setupSection.style.display = 'none';
     
     // Создаем Peer с лучшими ICE серверами
-    peer = new Peer({
-        host: '0.peerjs.com',
-        port: 443,
-        path: '/',
-        key: 'peerjs',
-        config: {
-            iceServers: getBestICEServers(),
-            iceCandidatePoolSize: 10,
-            iceTransportPolicy: 'all'
-        },
-        debug: 2
-    });
+    peer = createPeerInstance();
     
     setupPeerEvents();
     updateStatus('Подключение к комнате...');
@@ -594,6 +781,8 @@ async function connectToRoom() {
 function setupPeerEvents() {
     peer.on('open', (id) => {
         console.log('Peer opened with ID:', id);
+        peerReconnectAttempts = 0; // Сбрасываем счетчик при успешном подключении
+        
         if (roomHost) {
             updateStatus(`✅ Комната создана (${currentRoom}). Ожидание участников...`);
         } else {
@@ -621,73 +810,60 @@ function setupPeerEvents() {
     });
     
     peer.on('disconnected', () => {
-        updateStatus('Соединение потеряно. Попытка переподключения...');
+        console.log('Peer disconnected from server');
+        updateStatus('⚠️ Соединение с сервером потеряно. Переподключение...');
+        peerReconnectAttempts++;
+        
         setTimeout(() => {
-            if (peer && !peer.disconnected) {
+            if (peer && !peer.destroyed) {
+                console.log('Attempting to reconnect...');
                 peer.reconnect();
             }
-        }, 1000);
+        }, 1000 + (peerReconnectAttempts * 2000));
     });
     
-    // Добавляем отладку ICE
-    peer.on('iceStateChanged', (state) => {
-        console.log('ICE state changed:', state);
+    peer.on('close', () => {
+        console.log('Peer connection closed');
+        updateStatus('❌ Соединение закрыто');
     });
 }
 
-// Обработка ошибок соединения с улучшенной диагностикой
+// Обработка ошибок соединения
 function handleConnectionError(error) {
     console.error('Connection error:', error);
     
-    let message = 'Ошибка подключения: ';
+    let message = '';
     let detailedInfo = '';
     
     if (error.type === 'peer-unavailable') {
         message = '❌ Комната не найдена. Проверьте код комнаты.';
         detailedInfo = 'Убедитесь что:\n1. Код комнаты правильный\n2. Хост онлайн\n3. Попробуйте создать новую комнату';
-    } else if (error.type === 'server-error') {
-        message = '❌ Проблема с сервером PeerJS. Попробуйте:';
-        detailedInfo = '1. Перезагрузить страницу\n2. Использовать VPN\n3. Проверить соединение с интернетом';
+    } else if (error.type === 'server-error' || error.message.includes('Lost connection to server')) {
+        message = '❌ Потеряно соединение с сервером.';
+        detailedInfo = 'Проблемы с сервером PeerJS:\n1. Сервер может быть перегружен\n2. Проверьте интернет-соединение\n3. Попробуйте VPN\n4. Подождите 1 минуту и попробуйте снова';
+        
+        // Автоматическая попытка переподключения
+        setTimeout(() => attemptReconnect(), 3000);
+        
     } else if (error.message.includes('Could not connect to peer')) {
         message = '❌ Не удалось подключиться к участнику.';
-        detailedInfo = 'Возможные причины:\n- Участник вышел из комнаты\n- Проблемы с сетью\n- NAT/firewall блокирует соединение\n\nРекомендации:\n1. Создать новую комнату\n2. Проверить STUN серверы\n3. Использовать VPN';
+        detailedInfo = 'Возможные причины:\n- Участник вышел из комнаты\n- Проблемы с сетью\n- NAT/firewall блокирует соединение';
     } else if (error.message.includes('ICE') || error.message.includes('NAT')) {
         message = '❌ Проблема с сетевым соединением (NAT/Файрвол). ';
-        detailedInfo = 'Попробуйте:\n1. Перезагрузить страницу\n2. Использовать VPN\n3. Проверить настройки сети\n4. Разрешить WebRTC в браузере';
+        detailedInfo = 'Попробуйте:\n1. Перезагрузить страницу\n2. Использовать VPN\n3. Проверить настройки сети';
     } else if (error.message.includes('permission')) {
         message = '❌ Нет разрешения на доступ к микрофону.';
         detailedInfo = 'Разрешите доступ к микрофону в настройках браузера.';
     } else {
-        message += error.message;
+        message = '❌ Ошибка: ' + error.message;
     }
     
     updateStatus(message);
     addSystemMessage('⚠️ ' + message);
     
-    // Показываем подробную информацию если есть
-    if (detailedInfo) {
+    // Показываем подробную информацию
+    if (detailedInfo && !error.message.includes('Lost connection')) {
         console.log('Детали ошибки:', detailedInfo);
-        
-        // Можно показать alert для пользователя
-        if (error.type === 'server-error' || error.message.includes('Could not connect')) {
-            setTimeout(() => {
-                alert(`Проблема подключения:\n\n${detailedInfo}\n\nАвтоматическая попытка переподключения...`);
-            }, 500);
-        }
-    }
-    
-    // Автоматическая попытка переподключения
-    if (error.type === 'server-error' || error.message.includes('Could not connect')) {
-        setTimeout(() => {
-            if (peer && !peer.destroyed) {
-                console.log('Пытаемся переподключиться...');
-                if (roomHost) {
-                    peer.reconnect();
-                } else {
-                    connectToHost();
-                }
-            }
-        }, 3000);
     }
 }
 
@@ -702,7 +878,7 @@ function connectToHost() {
         metadata: {
             name: userName,
             timestamp: Date.now(),
-            iceServers: getBestICEServers() // Отправляем наши ICE серверы
+            iceServers: getBestICEServers()
         }
     });
     
@@ -722,10 +898,6 @@ function connectToHost() {
         console.error('Connection error:', err);
         updateStatus('Ошибка подключения к хосту');
         handleConnectionError(err);
-    });
-    
-    conn.on('iceStateChanged', (state) => {
-        console.log('ICE state for connection:', state);
     });
 }
 
@@ -877,7 +1049,6 @@ function handleIncomingData(data, fromPeer) {
             
         case 'ice_info':
             console.log('Получены ICE серверы от пира:', data.servers);
-            // Можно обновить свои ICE серверы если нужно
             break;
     }
 }
@@ -1210,7 +1381,7 @@ function addSystemMessage(text) {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-// Обновление списка участников (ТОЛЬКО активные)
+// Обновление списка участников
 function updateUsersList() {
     const users = getAllUsers();
     usersList.innerHTML = '';
@@ -1270,7 +1441,7 @@ function showChat() {
     
     if (roomHost) {
         addSystemMessage(`🎉 Вы создали комнату! Код: ${currentRoom}`);
-        addSystemMessage(`🔍 Найдено ${bestICEServers.filter(s => s.urls.toString().includes('stun')).length} STUN серверов`);
+        addSystemMessage(`🔍 Используется ${bestICEServers.filter(s => s.urls.toString().includes('stun')).length} STUN серверов`);
         addSystemMessage(`📞 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
     } else {
         addSystemMessage(`🎉 Вы присоединились к комнате ${currentRoom}`);
@@ -1300,6 +1471,8 @@ function updateStatus(text) {
         statusDiv.className = 'status testing';
     } else if (text.includes('❌')) {
         statusDiv.className = 'status error';
+    } else if (text.includes('⚠️') || text.includes('🔄')) {
+        statusDiv.className = 'status warning';
     } else {
         statusDiv.className = 'status';
     }
@@ -1333,26 +1506,6 @@ function copyRoomCode() {
     alert('Код комнаты скопирован в буфер обмена!');
 }
 
-// Загрузка PeerJS библиотеки
-function loadPeerJS() {
-    if (typeof Peer === 'undefined') {
-        console.log('Loading PeerJS...');
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js';
-        script.onload = function() {
-            console.log('✅ PeerJS loaded successfully');
-            updateStatus('✅ PeerJS загружен');
-        };
-        script.onerror = function() {
-            console.error('❌ Failed to load PeerJS');
-            alert('Ошибка загрузки PeerJS. Проверьте подключение к интернету.');
-        };
-        document.head.appendChild(script);
-    } else {
-        console.log('PeerJS already loaded');
-    }
-}
-
 // Получить аудиопоток для звонка
 async function getCallStream() {
     try {
@@ -1367,6 +1520,17 @@ async function getCallStream() {
             video: false
         });
         console.log('Call stream obtained');
+        
+        // Проверяем аудио трек
+        const audioTracks = callStream.getAudioTracks();
+        if (audioTracks.length > 0) {
+            console.log('Audio track details:', {
+                enabled: audioTracks[0].enabled,
+                readyState: audioTracks[0].readyState,
+                muted: audioTracks[0].muted
+            });
+        }
+        
         return callStream;
     } catch (error) {
         console.error('Ошибка получения аудиопотока:', error);
@@ -1384,6 +1548,9 @@ async function startAudioCall(targetUserId = null) {
         return;
     }
     
+    // Запускаем диагностику перед звонком
+    diagnoseAudioIssues();
+    
     if (!isMicrophoneTested) {
         const response = confirm('Рекомендуется сначала проверить микрофон. Начать звонок без проверки?');
         if (!response) return;
@@ -1398,42 +1565,31 @@ async function startAudioCall(targetUserId = null) {
             return;
         }
         
-        // Создаем новый peer
-        if (roomHost) {
-            peer = new Peer(currentRoom, {
-                host: '0.peerjs.com',
-                port: 443,
-                path: '/',
-                key: 'peerjs',
-                config: {
-                    iceServers: getBestICEServers(),
-                    iceCandidatePoolSize: 10,
-                    iceTransportPolicy: 'all'
-                },
-                debug: 2
-            });
-        } else {
-            peer = new Peer({
-                host: '0.peerjs.com',
-                port: 443,
-                path: '/',
-                key: 'peerjs',
-                config: {
-                    iceServers: getBestICEServers(),
-                    iceCandidatePoolSize: 10,
-                    iceTransportPolicy: 'all'
-                },
-                debug: 2
-            });
-        }
+        // Создаем нового пира
+        peer = roomHost ? createPeerInstance(currentRoom) : createPeerInstance();
         
         setupPeerEvents();
         
-        // Ждем подключения
-        await new Promise((resolve) => {
-            peer.on('open', resolve);
-            setTimeout(resolve, 2000);
-        });
+        // Ждем подключения с таймаутом
+        try {
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
+                
+                peer.on('open', () => {
+                    clearTimeout(timeout);
+                    resolve();
+                });
+                
+                peer.on('error', (err) => {
+                    clearTimeout(timeout);
+                    reject(err);
+                });
+            });
+        } catch (error) {
+            console.error('Failed to initialize peer:', error);
+            alert('Не удалось инициализировать соединение. Попробуйте снова.');
+            return;
+        }
         
         if (!roomHost) {
             // Переподключаемся к хосту
@@ -1442,7 +1598,17 @@ async function startAudioCall(targetUserId = null) {
     }
     
     const stream = await getCallStream();
-    if (!stream) return;
+    if (!stream) {
+        alert('Не удалось получить доступ к микрофону');
+        return;
+    }
+    
+    // Проверяем есть ли аудио трек
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+        alert('Микрофон не найден. Проверьте разрешения.');
+        return;
+    }
     
     if (!targetUserId) {
         const users = getAllUsers().filter(user => user.id !== peer.id);
@@ -1466,6 +1632,7 @@ async function startAudioCall(targetUserId = null) {
         const call = peer.call(targetUserId, stream, {
             metadata: {
                 callerName: userName,
+                timestamp: Date.now(),
                 iceServers: getBestICEServers()
             }
         });
@@ -1474,9 +1641,23 @@ async function startAudioCall(targetUserId = null) {
             throw new Error('Не удалось создать звонок');
         }
         
-        // Настраиваем обработчики звонка
+        // Добавляем обработчики для отладки
         call.on('stream', (remoteStream) => {
-            console.log('Получен удаленный поток');
+            console.log('✅ Получен удаленный аудио поток');
+            
+            // Проверяем удаленный поток
+            const remoteAudioTracks = remoteStream.getAudioTracks();
+            console.log('Remote audio tracks:', remoteAudioTracks.length);
+            
+            if (remoteAudioTracks.length > 0) {
+                console.log('Remote track details:', {
+                    enabled: remoteAudioTracks[0].enabled,
+                    readyState: remoteAudioTracks[0].readyState,
+                    muted: remoteAudioTracks[0].muted,
+                    kind: remoteAudioTracks[0].kind
+                });
+            }
+            
             handleRemoteStream(targetUserId, remoteStream);
             callState = 'in_call';
             callStartTime = Date.now();
@@ -1484,10 +1665,13 @@ async function startAudioCall(targetUserId = null) {
             callTimer = setInterval(updateCallTimer, 1000);
             updateCallUI();
             updateUsersList();
+            
+            addSystemMessage('✅ Звонок установлен. Проверьте громкость!');
         });
         
         call.on('close', () => {
             console.log('Звонок завершен');
+            addSystemMessage('📞 Звонок завершен');
             endCall();
         });
         
@@ -1498,29 +1682,86 @@ async function startAudioCall(targetUserId = null) {
         });
         
         // Отслеживаем ICE состояние
-        call.on('iceStateChanged', (state) => {
-            console.log('ICE state changed to:', state);
-            if (state === 'disconnected' || state === 'failed') {
-                addSystemMessage('⚠️ Проблемы с соединением звонка...');
+        call.connection.oniceconnectionstatechange = () => {
+            console.log('ICE connection state:', call.connection.iceConnectionState);
+            
+            if (call.connection.iceConnectionState === 'connected') {
+                console.log('✅ ICE соединение установлено');
+                addSystemMessage('✅ Соединение установлено');
+            } else if (call.connection.iceConnectionState === 'disconnected' || 
+                      call.connection.iceConnectionState === 'failed') {
+                console.warn('⚠️ Проблемы с ICE соединением:', call.connection.iceConnectionState);
+                addSystemMessage('⚠️ Проблемы с соединением...');
             }
-        });
+        };
         
         // Сохраняем соединение
         peerConnections[targetUserId] = call;
         
         // Таймаут звонка
-        setTimeout(() => {
+        const callTimeout = setTimeout(() => {
             if (callState === 'calling') {
+                console.log('Call timeout - no answer');
                 addSystemMessage('❌ Звонок не отвечает');
                 endCall();
             }
         }, 30000);
+        
+        // Очищаем таймаут при успешном подключении
+        call.on('stream', () => clearTimeout(callTimeout));
         
     } catch (error) {
         console.error('Ошибка при создании звонка:', error);
         alert('Ошибка при звонке: ' + error.message);
         endCall();
     }
+}
+
+// Обработка удаленного потока
+function handleRemoteStream(userId, stream) {
+    console.log('Handling remote stream for user:', userId);
+    
+    remoteStreams[userId] = stream;
+    
+    // Проверяем поток перед созданием аудио элемента
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+        console.error('No audio tracks in remote stream');
+        addSystemMessage('⚠️ Удаленный участник не передает аудио');
+        return;
+    }
+    
+    const audioId = `remote_audio_${userId}`;
+    let audioElement = document.getElementById(audioId);
+    
+    if (!audioElement) {
+        audioElement = document.createElement('audio');
+        audioElement.id = audioId;
+        audioElement.autoplay = true;
+        audioElement.controls = false;
+        audioElement.style.width = '100%';
+        audioElement.style.marginTop = '5px';
+        audioElement.volume = 1.0;
+        
+        const container = document.createElement('div');
+        container.className = 'remote-audio-container';
+        container.innerHTML = `<div style="font-size: 12px; color: #666;">Аудио от ${getUserName(userId)}</div>`;
+        container.appendChild(audioElement);
+        
+        remoteAudioContainer.appendChild(container);
+    }
+    
+    audioElement.srcObject = stream;
+    
+    // Обработчики для отладки
+    audioElement.oncanplay = () => {
+        console.log(`✅ Аудио может воспроизводиться для ${userId}`);
+        audioElement.play().catch(e => {
+            console.error(`❌ Не удалось воспроизвести аудио:`, e);
+        });
+    };
+    
+    console.log('Remote stream attached to audio element for user:', userId);
 }
 
 // Принять звонок
@@ -1613,11 +1854,6 @@ function handleIncomingCall(call) {
     call.on('close', endCall);
     call.on('error', endCall);
     
-    // Отслеживаем ICE состояние
-    call.on('iceStateChanged', (state) => {
-        console.log('Incoming call ICE state:', state);
-    });
-    
     updateCallUI();
     addSystemMessage(`📞 Входящий звонок от ${getUserName(call.peer)}`);
     
@@ -1627,29 +1863,6 @@ function handleIncomingCall(call) {
             rejectCall();
         }
     }, 30000);
-}
-
-// Обработка удаленного потока
-function handleRemoteStream(userId, stream) {
-    remoteStreams[userId] = stream;
-    
-    const audioId = `remote_audio_${userId}`;
-    let audioElement = document.getElementById(audioId);
-    
-    if (!audioElement) {
-        audioElement = document.createElement('audio');
-        audioElement.id = audioId;
-        audioElement.autoplay = true;
-        audioElement.controls = true;
-        audioElement.style.width = '100%';
-        audioElement.style.marginTop = '5px';
-        remoteAudioContainer.appendChild(audioElement);
-    }
-    
-    audioElement.srcObject = stream;
-    audioElement.setAttribute('title', `Аудио от ${getUserName(userId)}`);
-    
-    console.log('Remote stream playing for user:', userId);
 }
 
 // Обновление UI звонка
@@ -1721,6 +1934,30 @@ function showCallButton() {
     }
 }
 
+// Сброс peer соединения
+function resetPeerConnection() {
+    console.log('Resetting peer connection...');
+    
+    if (peer) {
+        try {
+            peer.destroy();
+        } catch (e) {
+            console.warn('Error destroying peer:', e);
+        }
+    }
+    
+    peer = null;
+    connections = {};
+    peerConnections = {};
+    remoteStreams = {};
+    peerReconnectAttempts = 0;
+    
+    // Очищаем аудио элементы
+    remoteAudioContainer.innerHTML = '';
+    
+    console.log('Peer connection reset');
+}
+
 // Отключение от комнаты
 function disconnect() {
     console.log('disconnect() called');
@@ -1733,9 +1970,15 @@ function disconnect() {
         stopRecording();
     }
     
+    // Останавливаем проверку здоровья
+    if (peerConnectionHealthCheck) {
+        clearInterval(peerConnectionHealthCheck);
+        peerConnectionHealthCheck = null;
+    }
+    
     // Закрываем все звонки
     Object.values(peerConnections).forEach(conn => {
-        if (conn.close) conn.close();
+        if (conn && conn.close) conn.close();
     });
     
     // Закрываем все соединения чата
@@ -1754,15 +1997,10 @@ function disconnect() {
         });
     }
     
-    // Закрываем peer соединение
-    if (peer) {
-        if (peer.disconnect) {
-            peer.disconnect();
-        }
-    }
+    // Сбрасываем peer соединение
+    resetPeerConnection();
     
     // Сбрасываем состояния
-    connections = {};
     currentRoom = null;
     roomHost = false;
     messageHistory = [];
@@ -1794,6 +2032,7 @@ function disconnect() {
     }
     
     updateStatus('❌ Отключено от комнаты');
+    addSystemMessage('🔌 Вы отключились от комнаты');
 }
 
 // Экранирование HTML
@@ -1834,6 +2073,8 @@ window.rejectCall = rejectCall;
 window.endCall = endCall;
 window.toggleVoiceRecording = toggleVoiceRecording;
 window.playVoiceMessage = playVoiceMessage;
+window.diagnoseAudioIssues = diagnoseAudioIssues;
+window.resetPeerConnection = resetPeerConnection;
 window.testAndSelectBestICEServers = testAndSelectBestICEServers;
 
-console.log('P2P Chat loaded with enhanced ICE servers, auto-test and user cleanup');
+console.log('P2P Chat loaded with enhanced ICE servers, auto-test, health checks and audio diagnostics');
