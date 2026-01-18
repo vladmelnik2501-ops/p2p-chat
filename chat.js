@@ -22,50 +22,100 @@ let callTimer = null;
 let callStartTime = null;
 let remoteStreams = {};
 let peerConnections = {};
+let bestICEServers = []; // Будут храниться лучшие ICE серверы
 const MAX_HISTORY = 100;
 const MAX_AUDIO_SIZE = 5 * 1024 * 1024;
 
-// Улучшенные ICE серверы для обхода NAT/Файрволов
-const ENHANCED_ICE_SERVERS = [
-    // STUN серверы Google
+// Все доступные ICE серверы (STUN + TURN)
+const ALL_ICE_SERVERS = [
+    // === GOOGLE STUN ===
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.l.google.com:19305' },
+    { urls: 'stun:stun1.l.google.com:19305' },
+    { urls: 'stun:stun2.l.google.com:19305' },
+    { urls: 'stun:stun3.l.google.com:19305' },
     
-    // STUN Twilio
+    // === TWILIO ===
     { urls: 'stun:global.stun.twilio.com:3478' },
     
-    // Дополнительные STUN
+    // === MOZILLA ===
+    { urls: 'stun:stun.services.mozilla.com:3478' },
+    
+    // === MICROSOFT ===
+    { urls: 'stun:stun.office.com:3478' },
+    
+    // === VOIP СЕРВЕРЫ ===
     { urls: 'stun:stun.voipgate.com:3478' },
     { urls: 'stun:stun.sipgate.com:3478' },
+    { urls: 'stun:stun.voipstunt.com:3478' },
+    { urls: 'stun:stun.voiparound.com:3478' },
+    { urls: 'stun:stun.voipbuster.com:3478' },
     
-    // TURN серверы (критически важны для обхода NAT)
+    // === ПУБЛИЧНЫЕ СЕРВЕРЫ ===
+    { urls: 'stun:stun.stunprotocol.org:3478' },
+    { urls: 'stun:stun.ideasip.com:3478' },
+    { urls: 'stun:stun.ekiga.net:3478' },
+    { urls: 'stun:stun.voip.blackberry.com:3478' },
+    { urls: 'stun:stun.nextcloud.com:3478' },
+    { urls: 'stun:stun.mgn.ru:3478' },
+    { urls: 'stun:stun.sipnet.ru:3478' },
+    { urls: 'stun:stun.iptel.org:3478' },
+    { urls: 'stun:stun.rockenstein.de:3478' },
+    { urls: 'stun:stun.freeswitch.org:3478' },
+    { urls: 'stun:stun.solcon.nl:3478' },
+    { urls: 'stun:stun.t-online.de:3478' },
+    { urls: 'stun:stun.freevoipdeal.com:3478' },
+    
+    // === АЛЬТЕРНАТИВНЫЕ ПОРТЫ ===
+    { urls: 'stun:stun.l.google.com:5349' },
+    { urls: 'stun:stun1.l.google.com:5349' },
+    { urls: 'stun:stun2.l.google.com:5349' },
+    { urls: 'stun:stun3.l.google.com:5349' },
+    
+    // === TURN СЕРВЕРЫ (для сложных сетей) ===
     {
-        urls: 'turn:openrelay.metered.ca:80',
+        urls: [
+            'turn:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:443',
+            'turn:openrelay.metered.ca:443?transport=tcp'
+        ],
         username: 'openrelayproject',
         credential: 'openrelayproject'
     },
     {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: [
+            'turn:numb.viagenie.ca:3478',
+            'turn:numb.viagenie.ca:3478?transport=tcp'
+        ],
+        username: 'webrtc@live.com',
+        credential: 'muazkh'
     },
     {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: [
+            'turn:turn.bistri.com:80',
+            'turn:turn.bistri.com:80?transport=tcp'
+        ],
+        username: 'homeo',
+        credential: 'homeo'
     },
     {
-        urls: 'turn:numb.viagenie.ca',
-        credential: 'muazkh',
-        username: 'webrtc@live.com'
+        urls: 'turn:relay.metered.ca:80',
+        username: 'free',
+        credential: 'free'
     },
     {
-        urls: 'turn:turn.bistri.com:80',
-        credential: 'homeo',
-        username: 'homeo'
+        urls: 'turn:relay.metered.ca:443',
+        username: 'free',
+        credential: 'free'
+    },
+    {
+        urls: 'turn:relay.metered.ca:443?transport=tcp',
+        username: 'free',
+        credential: 'free'
     }
 ];
 
@@ -97,10 +147,17 @@ const endCallBtn = document.getElementById('endCallBtn');
 const callTimerElement = document.getElementById('callTimer');
 const remoteAudioContainer = document.getElementById('remoteAudioContainer');
 const startCallBtn = document.getElementById('startCallBtn');
+const stunTestBtn = document.getElementById('stunTestBtn');
+const iceStatusDiv = document.getElementById('iceStatus');
 
 // Инициализация
-function init() {
+async function init() {
     console.log('P2P Chat initializing...');
+    
+    // Загружаем PeerJS
+    loadPeerJS();
+    
+    // Восстанавливаем имя пользователя
     const savedName = localStorage.getItem('p2p_chat_username');
     if (savedName) {
         userName = savedName;
@@ -112,11 +169,190 @@ function init() {
     }
     console.log('User:', userName);
     
+    // Тестируем ICE серверы
+    await testAndSelectBestICEServers();
+    
     // Запускаем очистку старых пользователей
     cleanupUserList();
     
     // Периодическая очистка
-    setInterval(cleanupUserList, 30000); // Каждые 30 секунд
+    setInterval(cleanupUserList, 30000);
+    
+    // Добавляем кнопку теста STUN если её нет
+    if (!stunTestBtn) {
+        addSTUNTestButton();
+    }
+}
+
+// Добавление кнопки теста STUN
+function addSTUNTestButton() {
+    const testBtn = document.createElement('button');
+    testBtn.id = 'stunTestBtn';
+    testBtn.textContent = '🔍 Тест соединения';
+    testBtn.className = 'ice-test-btn';
+    testBtn.onclick = testAndSelectBestICEServers;
+    
+    const setupDiv = document.querySelector('#setupSection .setup-container');
+    if (setupDiv) {
+        setupDiv.appendChild(testBtn);
+    }
+}
+
+// Тест и выбор лучших ICE серверов
+async function testAndSelectBestICEServers() {
+    console.log('Тестирование ICE серверов...');
+    updateStatus('🔍 Тестирование сетевых серверов...');
+    
+    if (iceStatusDiv) {
+        iceStatusDiv.innerHTML = '<div class="ice-testing">⏳ Тестирование STUN/TURN серверов...</div>';
+    }
+    
+    const testResults = [];
+    const workingServers = [];
+    
+    // Берем первые 15 серверов для быстрого теста
+    const serversToTest = ALL_ICE_SERVERS.slice(0, 15);
+    
+    for (const server of serversToTest) {
+        try {
+            const result = await testICEServer(server);
+            testResults.push(result);
+            
+            if (result.status === 'success') {
+                workingServers.push(server);
+                console.log(`✅ Сервер работает: ${server.urls}`);
+            }
+            
+            // Обновляем статус в реальном времени
+            if (iceStatusDiv) {
+                const statusItem = document.createElement('div');
+                statusItem.className = `ice-server-status ${result.status === 'success' ? 'working' : 'failed'}`;
+                statusItem.textContent = `${result.server} - ${result.details}`;
+                iceStatusDiv.appendChild(statusItem);
+            }
+            
+        } catch (error) {
+            console.warn(`❌ Ошибка теста сервера:`, server.urls, error);
+        }
+        
+        // Небольшая задержка между тестами
+        await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    
+    // Если нет работающих STUN, добавляем минимум Google STUN
+    if (workingServers.length === 0) {
+        console.warn('Нет работающих STUN серверов, используем Google по умолчанию');
+        workingServers.push({ urls: 'stun:stun.l.google.com:19302' });
+        workingServers.push({ urls: 'stun:stun1.l.google.com:19302' });
+    }
+    
+    // Добавляем TURN серверы в конец (они дороже, но нужны для сложных сетей)
+    const turnServers = ALL_ICE_SERVERS.filter(s => 
+        s.urls.toString().includes('turn:') || s.urls.toString().includes('turns:')
+    );
+    
+    bestICEServers = [...workingServers, ...turnServers.slice(0, 3)];
+    
+    console.log(`✅ Выбрано ${workingServers.length} работающих STUN и ${turnServers.slice(0,3).length} TURN серверов`);
+    
+    const summary = `Найдено ${workingServers.length} работающих серверов`;
+    updateStatus(summary);
+    
+    if (iceStatusDiv) {
+        iceStatusDiv.innerHTML = `
+            <div class="ice-summary">
+                <strong>Результаты теста:</strong><br>
+                ✅ Работающих: ${workingServers.length}<br>
+                ❌ Недоступных: ${serversToTest.length - workingServers.length}<br>
+                🔄 TURN серверов: ${turnServers.slice(0,3).length}
+            </div>
+        `;
+    }
+    
+    return bestICEServers;
+}
+
+// Тест одного ICE сервера
+async function testICEServer(server) {
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            resolve({
+                server: Array.isArray(server.urls) ? server.urls[0] : server.urls,
+                status: 'timeout',
+                details: 'Таймаут (3 сек)'
+            });
+        }, 3000);
+        
+        try {
+            const config = { iceServers: [server] };
+            const pc = new RTCPeerConnection(config);
+            
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    clearTimeout(timeout);
+                    pc.close();
+                    
+                    resolve({
+                        server: Array.isArray(server.urls) ? server.urls[0] : server.urls,
+                        status: 'success',
+                        details: `Работает (${event.candidate.protocol})`
+                    });
+                }
+            };
+            
+            pc.createDataChannel('test');
+            pc.createOffer()
+                .then(offer => pc.setLocalDescription(offer))
+                .catch(() => {
+                    clearTimeout(timeout);
+                    pc.close();
+                    resolve({
+                        server: Array.isArray(server.urls) ? server.urls[0] : server.urls,
+                        status: 'error',
+                        details: 'Ошибка создания offer'
+                    });
+                });
+            
+            // Дополнительная проверка через 1 секунду
+            setTimeout(() => {
+                if (pc.iceGatheringState === 'complete') {
+                    clearTimeout(timeout);
+                    pc.close();
+                    resolve({
+                        server: Array.isArray(server.urls) ? server.urls[0] : server.urls,
+                        status: pc.iceConnectionState === 'new' ? 'no-candidates' : 'success',
+                        details: pc.iceConnectionState === 'new' ? 'Нет кандидатов' : 'Собраны кандидаты'
+                    });
+                }
+            }, 1000);
+            
+        } catch (error) {
+            clearTimeout(timeout);
+            resolve({
+                server: Array.isArray(server.urls) ? server.urls[0] : server.urls,
+                status: 'error',
+                details: error.message.substring(0, 50)
+            });
+        }
+    });
+}
+
+// Получить лучшие ICE серверы (с кэшированием)
+function getBestICEServers() {
+    if (bestICEServers.length === 0) {
+        // Если ещё не тестировали, возвращаем проверенные по умолчанию
+        return [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            {
+                urls: 'turn:openrelay.metered.ca:80',
+                username: 'openrelayproject',
+                credential: 'openrelayproject'
+            }
+        ];
+    }
+    return bestICEServers;
 }
 
 // Очистка старых пользователей из localStorage
@@ -130,7 +366,6 @@ function cleanupUserList() {
         if (key.startsWith('p2p_chat_user_') && !key.endsWith('_time')) {
             const userId = key.replace('p2p_chat_user_', '');
             if (!activeIds.includes(userId)) {
-                // Проверяем время последней активности (5 минут)
                 const timeKey = key + '_time';
                 const timeStamp = localStorage.getItem(timeKey);
                 const fiveMinutesAgo = Date.now() - 300000;
@@ -274,10 +509,14 @@ async function createRoom() {
     
     setupSection.style.display = 'none';
     
-    // Создаем Peer с улучшенными ICE серверами
+    // Создаем Peer с лучшими ICE серверами
     peer = new Peer(currentRoom, {
+        host: '0.peerjs.com',
+        port: 443,
+        path: '/',
+        key: 'peerjs',
         config: {
-            iceServers: ENHANCED_ICE_SERVERS,
+            iceServers: getBestICEServers(),
             iceCandidatePoolSize: 10,
             iceTransportPolicy: 'all'
         },
@@ -333,10 +572,14 @@ async function connectToRoom() {
     
     setupSection.style.display = 'none';
     
-    // Создаем Peer с улучшенными ICE серверами
+    // Создаем Peer с лучшими ICE серверами
     peer = new Peer({
+        host: '0.peerjs.com',
+        port: 443,
+        path: '/',
+        key: 'peerjs',
         config: {
-            iceServers: ENHANCED_ICE_SERVERS,
+            iceServers: getBestICEServers(),
             iceCandidatePoolSize: 10,
             iceTransportPolicy: 'all'
         },
@@ -357,6 +600,9 @@ function setupPeerEvents() {
             connectToHost();
         }
         showCallButton();
+        
+        // Логируем ICE серверы которые используются
+        console.log('Используемые ICE серверы:', getBestICEServers());
     });
     
     peer.on('connection', (conn) => {
@@ -383,40 +629,80 @@ function setupPeerEvents() {
         }, 1000);
     });
     
-    // Диагностика ICE соединения
-    if (peer._options.config) {
-        console.log('Using ICE servers:', peer._options.config.iceServers);
-    }
+    // Добавляем отладку ICE
+    peer.on('iceStateChanged', (state) => {
+        console.log('ICE state changed:', state);
+    });
 }
 
-// Обработка ошибок соединения
+// Обработка ошибок соединения с улучшенной диагностикой
 function handleConnectionError(error) {
     console.error('Connection error:', error);
     
     let message = 'Ошибка подключения: ';
+    let detailedInfo = '';
+    
     if (error.type === 'peer-unavailable') {
         message = '❌ Комната не найдена. Проверьте код комнаты.';
+        detailedInfo = 'Убедитесь что:\n1. Код комнаты правильный\n2. Хост онлайн\n3. Попробуйте создать новую комнату';
+    } else if (error.type === 'server-error') {
+        message = '❌ Проблема с сервером PeerJS. Попробуйте:';
+        detailedInfo = '1. Перезагрузить страницу\n2. Использовать VPN\n3. Проверить соединение с интернетом';
+    } else if (error.message.includes('Could not connect to peer')) {
+        message = '❌ Не удалось подключиться к участнику.';
+        detailedInfo = 'Возможные причины:\n- Участник вышел из комнаты\n- Проблемы с сетью\n- NAT/firewall блокирует соединение\n\nРекомендации:\n1. Создать новую комнату\n2. Проверить STUN серверы\n3. Использовать VPN';
     } else if (error.message.includes('ICE') || error.message.includes('NAT')) {
-        message += 'Проблема с сетевым соединением. ';
-        message += 'Попробуйте: 1) Перезагрузить страницу 2) Использовать VPN 3) Проверить настройки сети';
+        message = '❌ Проблема с сетевым соединением (NAT/Файрвол). ';
+        detailedInfo = 'Попробуйте:\n1. Перезагрузить страницу\n2. Использовать VPN\n3. Проверить настройки сети\n4. Разрешить WebRTC в браузере';
     } else if (error.message.includes('permission')) {
-        message += 'Нет разрешения на доступ к микрофону.';
+        message = '❌ Нет разрешения на доступ к микрофону.';
+        detailedInfo = 'Разрешите доступ к микрофону в настройках браузера.';
     } else {
         message += error.message;
     }
     
     updateStatus(message);
     addSystemMessage('⚠️ ' + message);
+    
+    // Показываем подробную информацию если есть
+    if (detailedInfo) {
+        console.log('Детали ошибки:', detailedInfo);
+        
+        // Можно показать alert для пользователя
+        if (error.type === 'server-error' || error.message.includes('Could not connect')) {
+            setTimeout(() => {
+                alert(`Проблема подключения:\n\n${detailedInfo}\n\nАвтоматическая попытка переподключения...`);
+            }, 500);
+        }
+    }
+    
+    // Автоматическая попытка переподключения
+    if (error.type === 'server-error' || error.message.includes('Could not connect')) {
+        setTimeout(() => {
+            if (peer && !peer.destroyed) {
+                console.log('Пытаемся переподключиться...');
+                if (roomHost) {
+                    peer.reconnect();
+                } else {
+                    connectToHost();
+                }
+            }
+        }, 3000);
+    }
 }
 
 // Подключение к хосту
 function connectToHost() {
     console.log('Connecting to host...');
+    updateStatus('Установка P2P соединения...');
+    
     const conn = peer.connect(currentRoom, {
         reliable: true,
+        serialization: 'json',
         metadata: {
             name: userName,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            iceServers: getBestICEServers() // Отправляем наши ICE серверы
         }
     });
     
@@ -424,11 +710,22 @@ function connectToHost() {
         console.log('Connected to host');
         setupConnection(conn);
         showChat();
+        
+        // Отправляем информацию о наших ICE серверах
+        conn.send({
+            type: 'ice_info',
+            servers: getBestICEServers()
+        });
     });
     
     conn.on('error', (err) => {
         console.error('Connection error:', err);
         updateStatus('Ошибка подключения к хосту');
+        handleConnectionError(err);
+    });
+    
+    conn.on('iceStateChanged', (state) => {
+        console.log('ICE state for connection:', state);
     });
 }
 
@@ -451,7 +748,6 @@ function setupConnection(conn) {
             addSystemMessage(`${user.name} покинул чат`);
         }
         
-        // Удаляем из localStorage при отключении
         localStorage.removeItem(`p2p_chat_user_${peerId}`);
         localStorage.removeItem(`p2p_chat_user_${peerId}_time`);
         
@@ -487,7 +783,7 @@ function setupConnection(conn) {
 
 // Обработка входящих данных
 function handleIncomingData(data, fromPeer) {
-    console.log('Получены данные от', fromPeer, ':', data);
+    console.log('Получены данные от', fromPeer, ':', data.type);
     
     if (showingRoomInfo && (data.type === 'message' || data.type === 'voice_message' || data.type === 'call_event')) {
         backToChat();
@@ -577,6 +873,11 @@ function handleIncomingData(data, fromPeer) {
                 saveUserInfo(user.id, user.name);
             });
             updateUsersList();
+            break;
+            
+        case 'ice_info':
+            console.log('Получены ICE серверы от пира:', data.servers);
+            // Можно обновить свои ICE серверы если нужно
             break;
     }
 }
@@ -969,11 +1270,11 @@ function showChat() {
     
     if (roomHost) {
         addSystemMessage(`🎉 Вы создали комнату! Код: ${currentRoom}`);
-        addSystemMessage(`🔍 Для соединения между разными сетями используются TURN серверы`);
+        addSystemMessage(`🔍 Найдено ${bestICEServers.filter(s => s.urls.toString().includes('stun')).length} STUN серверов`);
         addSystemMessage(`📞 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
     } else {
         addSystemMessage(`🎉 Вы присоединились к комнате ${currentRoom}`);
-        addSystemMessage(`🔍 Если есть проблемы со звуком, попробуйте обновить страницу или VPN`);
+        addSystemMessage(`🔍 Используется ${bestICEServers.length} сетевых серверов`);
         addSystemMessage(`📞 Теперь вы можете отправлять голосовые сообщения и совершать звонки!`);
     }
     
@@ -995,6 +1296,10 @@ function updateStatus(text) {
         statusDiv.className = 'status connected';
     } else if (text.includes('🔴')) {
         statusDiv.className = 'status recording';
+    } else if (text.includes('🔍')) {
+        statusDiv.className = 'status testing';
+    } else if (text.includes('❌')) {
+        statusDiv.className = 'status error';
     } else {
         statusDiv.className = 'status';
     }
@@ -1036,6 +1341,7 @@ function loadPeerJS() {
         script.src = 'https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js';
         script.onload = function() {
             console.log('✅ PeerJS loaded successfully');
+            updateStatus('✅ PeerJS загружен');
         };
         script.onerror = function() {
             console.error('❌ Failed to load PeerJS');
@@ -1069,7 +1375,7 @@ async function getCallStream() {
     }
 }
 
-// Начать аудиозвонок (с исправленной реконнектом)
+// Начать аудиозвонок
 async function startAudioCall(targetUserId = null) {
     console.log('startAudioCall() called, callState:', callState);
     
@@ -1084,13 +1390,6 @@ async function startAudioCall(targetUserId = null) {
     }
     
     // Проверяем что peer существует и подключен
-    console.log('Peer state:', {
-        exists: !!peer,
-        destroyed: peer ? peer.destroyed : 'no peer',
-        disconnected: peer ? peer.disconnected : 'no peer',
-        open: peer ? peer.open : 'no peer'
-    });
-    
     if (!peer || peer.destroyed || peer.disconnected) {
         console.log('Peer не готов, требуется переподключение...');
         
@@ -1102,8 +1401,12 @@ async function startAudioCall(targetUserId = null) {
         // Создаем новый peer
         if (roomHost) {
             peer = new Peer(currentRoom, {
+                host: '0.peerjs.com',
+                port: 443,
+                path: '/',
+                key: 'peerjs',
                 config: {
-                    iceServers: ENHANCED_ICE_SERVERS,
+                    iceServers: getBestICEServers(),
                     iceCandidatePoolSize: 10,
                     iceTransportPolicy: 'all'
                 },
@@ -1111,8 +1414,12 @@ async function startAudioCall(targetUserId = null) {
             });
         } else {
             peer = new Peer({
+                host: '0.peerjs.com',
+                port: 443,
+                path: '/',
+                key: 'peerjs',
                 config: {
-                    iceServers: ENHANCED_ICE_SERVERS,
+                    iceServers: getBestICEServers(),
                     iceCandidatePoolSize: 10,
                     iceTransportPolicy: 'all'
                 },
@@ -1155,8 +1462,13 @@ async function startAudioCall(targetUserId = null) {
     addSystemMessage(`📞 Вы звоните ${getUserName(targetUserId)}...`);
     
     try {
-        // Создаем звонок
-        const call = peer.call(targetUserId, stream);
+        // Создаем звонок с улучшенной конфигурацией
+        const call = peer.call(targetUserId, stream, {
+            metadata: {
+                callerName: userName,
+                iceServers: getBestICEServers()
+            }
+        });
         
         if (!call) {
             throw new Error('Не удалось создать звонок');
@@ -1183,6 +1495,14 @@ async function startAudioCall(targetUserId = null) {
             console.error('Ошибка звонка:', err);
             addSystemMessage('❌ Ошибка звонка: ' + err.message);
             endCall();
+        });
+        
+        // Отслеживаем ICE состояние
+        call.on('iceStateChanged', (state) => {
+            console.log('ICE state changed to:', state);
+            if (state === 'disconnected' || state === 'failed') {
+                addSystemMessage('⚠️ Проблемы с соединением звонка...');
+            }
         });
         
         // Сохраняем соединение
@@ -1293,6 +1613,11 @@ function handleIncomingCall(call) {
     call.on('close', endCall);
     call.on('error', endCall);
     
+    // Отслеживаем ICE состояние
+    call.on('iceStateChanged', (state) => {
+        console.log('Incoming call ICE state:', state);
+    });
+    
     updateCallUI();
     addSystemMessage(`📞 Входящий звонок от ${getUserName(call.peer)}`);
     
@@ -1396,7 +1721,7 @@ function showCallButton() {
     }
 }
 
-// Отключение от комнаты (не уничтожаем peer полностью)
+// Отключение от комнаты
 function disconnect() {
     console.log('disconnect() called');
     
@@ -1429,7 +1754,7 @@ function disconnect() {
         });
     }
     
-    // Закрываем peer соединение, но не уничтожаем объект
+    // Закрываем peer соединение
     if (peer) {
         if (peer.disconnect) {
             peer.disconnect();
@@ -1487,10 +1812,9 @@ function handleKeyPress(event) {
 }
 
 // Инициализация при загрузке страницы
-window.addEventListener('DOMContentLoaded', function() {
+window.addEventListener('DOMContentLoaded', async function() {
     console.log('DOM loaded, initializing P2P Chat...');
-    init();
-    loadPeerJS(); // Загружаем PeerJS отдельно
+    await init();
 });
 
 // Экспорт функций в глобальную область
@@ -1510,5 +1834,6 @@ window.rejectCall = rejectCall;
 window.endCall = endCall;
 window.toggleVoiceRecording = toggleVoiceRecording;
 window.playVoiceMessage = playVoiceMessage;
+window.testAndSelectBestICEServers = testAndSelectBestICEServers;
 
-console.log('P2P Chat loaded with enhanced ICE servers and user cleanup');
+console.log('P2P Chat loaded with enhanced ICE servers, auto-test and user cleanup');
