@@ -55,7 +55,8 @@ const remoteAudioContainer = document.getElementById('remoteAudioContainer');
 const startCallBtn = document.getElementById('startCallBtn');
 
 // Инициализация
-async function init() {
+function init() {
+    console.log('P2P Chat initializing...');
     const savedName = localStorage.getItem('p2p_chat_username');
     if (savedName) {
         userName = savedName;
@@ -63,15 +64,18 @@ async function init() {
     } else {
         userName = generateRandomName();
         userNameInput.value = userName;
-        saveUserName();
+        localStorage.setItem('p2p_chat_username', userName);
     }
+    console.log('User:', userName);
     
-    loadPeerJS();
-    
-    if (!window.AudioContext && !window.webkitAudioContext) {
-        console.warn('Web Audio API не поддерживается в этом браузере');
+    // НЕ вызываем loadPeerJS() здесь!
+    // Вместо этого проверяем если PeerJS уже загружен
+    if (typeof Peer !== 'undefined') {
+        console.log('PeerJS already loaded');
+        // PeerJS уже загружен, можно продолжать
     } else {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        console.log('PeerJS not loaded yet');
+        // PeerJS загрузится позже через loadPeerJS()
     }
 }
 
@@ -1258,15 +1262,21 @@ function escapeHtml(text) {
 // Загрузка PeerJS библиотеки
 function loadPeerJS() {
     if (typeof Peer === 'undefined') {
+        console.log('Loading PeerJS...');
         const script = document.createElement('script');
         script.src = 'https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js';
-        script.onload = () => {
-            console.log('PeerJS загружен');
-            init();
+        script.onload = function() {
+            console.log('PeerJS loaded successfully');
+            // НЕ вызываем init() здесь!
+            // Просто логируем что библиотека загружена
+        };
+        script.onerror = function() {
+            console.error('Failed to load PeerJS');
+            alert('Ошибка загрузки PeerJS. Проверьте подключение к интернету.');
         };
         document.head.appendChild(script);
     } else {
-        init();
+        console.log('PeerJS already loaded');
     }
 }
 
