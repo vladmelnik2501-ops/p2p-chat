@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Чат без сервера</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔗 P2P Чат с голосовыми сообщениями</h1>
+            <p>Создайте комнату или присоединитесь по коду</p>
+        </div>
+        
+        <div class="content">
+            <!-- Настройки пользователя -->
+            <div class="setup-section" id="setupSection">
+                <h2 class="section-title">👤 Настройка профиля</h2>
+                <div class="setup-form">
+                    <div class="form-group">
+                        <label for="userName">Ваше имя:</label>
+                        <input type="text" id="userName" placeholder="Введите ваше имя" maxlength="20" value="">
+                    </div>
+                    <div class="form-group">
+                        <label>Тест микрофона:</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <button onclick="testMicrophone()" class="secondary">🎤 Проверить микрофон</button>
+                            <div id="micTest" style="font-size: 14px; color: #666;"></div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <button onclick="saveUserName()" style="width: 100%;">💾 Сохранить и продолжить</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Управление комнатой -->
+            <div class="room-section" id="roomSection">
+                <h2 class="section-title">🎮 Управление комнатой</h2>
+                <div class="input-group">
+                    <button onclick="createRoom()">🎯 Создать комнату</button>
+                    <input type="text" id="connectCode" placeholder="Введите код комнаты">
+                    <button onclick="connectToRoom()">🔗 Присоединиться</button>
+                </div>
+                
+                <div id="roomInfo" class="hidden">
+                    <h3>✅ Комната создана!</h3>
+                    <p>Отправьте этот код друзьям:</p>
+                    <input type="text" id="roomCode" readonly>
+                    <div style="margin-top: 15px;">
+                        <button onclick="copyRoomCode()" class="secondary">📋 Скопировать код</button>
+                        <button onclick="changeName()" class="secondary">✏️ Изменить имя</button>
+                        <button onclick="backToChat()" class="secondary" style="margin-top: 10px; width: 100%;">← Вернуться в чат</button>
+                    </div>
+                    <div class="users-list" id="usersList"></div>
+                </div>
+            </div>
+            
+            <!-- Чат -->
+            <div class="chat-section hidden" id="chatSection">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 class="section-title" style="margin: 0;">💬 Чат комнаты</h2>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <div id="onlineCount" class="user-count">1 онлайн</div>
+                        <button id="startCallBtn" class="secondary" style="background: #28a745; display: none;">📞 Аудиозвонок</button>
+                        <button onclick="toggleRoomInfo()" class="secondary" id="infoButton">ℹ️ Инфо</button>
+                        <button onclick="disconnect()" class="secondary" style="background: #dc3545;">🚪 Выйти</button>
+                    </div>
+                </div>
+                
+                <div class="chat-container">
+                    <div id="messages"></div>
+                    
+                    <!-- Контролы аудиозвонка -->
+                    <div class="call-controls hidden" id="callControls">
+                        <div style="display: flex; align-items: center; gap: 15px;">
+                            <div id="callStatus" style="flex: 1; font-weight: 500;"></div>
+                            <button id="acceptCallBtn" class="secondary" onclick="acceptCall()" style="background: #28a745; display: none;">📞 Принять</button>
+                            <button id="rejectCallBtn" class="secondary" onclick="rejectCall()" style="background: #dc3545; display: none;">❌ Отклонить</button>
+                            <button id="endCallBtn" class="secondary" onclick="endCall()" style="background: #dc3545; display: none;">📞 Завершить</button>
+                            <div id="callTimer" style="font-weight: bold; color: #667eea; display: none;"></div>
+                        </div>
+                        <div id="remoteAudioContainer" style="margin-top: 10px;"></div>
+                    </div>
+                    
+                    <div class="status" id="status">❌ Нет подключения</div>
+                    
+                    <!-- Контролы записи голоса -->
+                    <div class="voice-controls hidden" id="voiceControls">
+                        <div class="voice-visualizer">
+                            <div class="voice-wave" id="voiceWave"></div>
+                        </div>
+                        <div class="recording-time" id="recordingTime">0:00</div>
+                        <button onclick="stopRecording()" class="voice-btn" style="background: #dc3545;">⏹️ Остановить</button>
+                    </div>
+                    
+                    <!-- Поле ввода сообщений -->
+                    <div class="message-input">
+                        <input type="text" id="messageInput" placeholder="Введите сообщение..." onkeypress="handleKeyPress(event)" disabled>
+                        <button onclick="toggleVoiceRecording()" id="voiceButton" class="voice-btn" disabled>🎤 Голосовое</button>
+                        <button onclick="sendMessage()" id="sendButton" disabled>📨 Отправить</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Скрытый аудио элемент для воспроизведения -->
+    <audio id="audioPlayer" style="display: none;"></audio>
+
+    <script src="chat.js"></script>
+</body>
+</html>
